@@ -1,4 +1,4 @@
-from os import devnull, remove
+from os import devnull, remove, environ
 import traceback
 import sys
 import pickle
@@ -635,30 +635,30 @@ def get_ed_h0(
 
     vs_star = None
     ebs_star = None
+    bath_hopping_filename = f"{environ.get('RSPT_SCRATCH', '.')}/impurityModel_bath_energies_and_hopping_parameters_{label}.npy"
     if comm.rank == 0:
         # Check to see if we have already done a fit
         vs_star = []
         ebs_star = []
         try:
             with open(
-                f"impurityModel_bath_energies_and_hopping_parameters_{label}.npy", "rb"
+                bath_hopping_filename,
+                "rb",
             ) as f:
                 n_block = np.load(f)
                 for _ in range(n_block):
                     vs_star.append(np.load(f))
                     ebs_star.append(np.load(f))
-            remove(f"impurityModel_bath_energies_and_hopping_parameters_{label}.npy")
+            remove(bath_hopping_filename)
         except FileNotFoundError:
             vs_star = None
             ebs_star = None
         except ValueError:
-            remove(f"impurityModel_bath_energies_and_hopping_parameters_{label}.npy")
+            remove(bath_hopping_filename)
             vs_star = None
             ebs_star = None
     if ebs_star is not None and verbose:
-        print(
-            f"Read bath energies and hopping parameters from impurityModel_bath_energies_and_hopping_parameters_{label}.npy"
-        )
+        print(f"Read bath energies and hopping parameters")
 
     ebs_star, vs_star = fit_hyb(
         w,
@@ -759,9 +759,7 @@ def get_ed_h0(
 
     if save_baths_and_hopping or True:
         if comm is None or comm.rank == 0:
-            with open(
-                f"impurityModel_bath_energies_and_hopping_parameters_{label}.npy", "wb"
-            ) as f:
+            with open(bath_hopping_filename, "wb") as f:
                 np.save(f, len(vs_star))
                 for i in range(len(vs_star)):
                     np.save(f, vs_star[i])
