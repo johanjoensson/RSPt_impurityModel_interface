@@ -1,0 +1,23 @@
+[project]
+name = "impurityModel_interface"
+description = "Interface for running impurityModel from RSPt"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+dependencies = [
+"impurityModel @ git+https://github.com/johanjoensson/impurityModel.git"
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/johanjoensson/impurityModel_interface/"
+Issues = "https://github.com/johanjoensson/impurityModel_interface//issues"
+
+
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
