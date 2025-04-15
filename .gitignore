@@ -50,3 +50,12 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Vim temporary files
+.*~
+
+# Stuff that CMake builds, but we don't need to track
+src/impurityModel_interface.egg-info/
+src/impurityModel_interface/__pycache__/
+src/run_impurityModel.c
+build/
