@@ -15,10 +15,12 @@ mpi4py.rc.finalize = False
 from mpi4py import MPI
 import rspt2spectra.hyb_fit as hf
 
-from impurityModel.ed.greens_function import (
-    save_Greens_function,
+from impurityModel.ed.block_structure import (
     BlockStructure,
     build_block_structure,
+)
+from impurityModel.ed.greens_function import (
+    save_Greens_function,
     build_full_greens_function,
     block_diagonalize_hyb,
 )
@@ -444,10 +446,7 @@ def run_impmod_ed(
                 ),
                 tau=tau,
                 verbosity=verbosity,
-                blocks=[
-                    block_structure.blocks[i]
-                    for i in block_structure.inequivalent_blocks
-                ],
+                block_structure=block_structure,
                 rot_to_spherical=np.conj(corr_to_cf.T) @ corr_to_spherical,
                 cluster_label=label.strip(),
                 comm=comm,
