@@ -2,7 +2,7 @@ import cffi
 
 ffibuilder = cffi.FFI()
 
-with open("src/run_impurityModel.h") as f:
+with open("run_impurityModel.h") as f:
     data = "".join([line for line in f if not line.startswith("#")])
     ffibuilder.embedding_api(data)
 
@@ -19,5 +19,4 @@ ffibuilder.embedding_init_code(
 """
 )
 
-ffibuilder.emit_c_code("src/run_impurityModel.c")
-# ffibuilder.compile(target="libimpomod_interface.*", verbose=True)
+ffibuilder.emit_c_code("run_impurityModel.c")

@@ -4,6 +4,9 @@ project(impurityModel_interface VERSION 1.0.0 LANGUAGES C)
 
 include(CMakePrintHelpers)
 
+option(NODEPS "Do not install requirements (impurityModel)" OFF)
+option(EDITABLE_DEPS "Install editable dependencies (impurityModel)" OFF)
+
 set(Python3_FIND_VIRTUALENV FIRST)
 find_package(Python3 3.2 COMPONENTS Interpreter Development.Embed  REQUIRED)
 
@@ -25,21 +28,29 @@ else()
         message(STATUS "Installing cffi")
         execute_process(
                 COMMAND ${Python3_EXECUTABLE} -m pip install ${PIP_USER} cffi
-                RESULT_VARIABLE CFFI_INSTALL
                 COMMAND_ERROR_IS_FATAL ANY
         )
 endif()
 
-execute_process(
-        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/library_builder.py
-        RESULT_VARIABLE LIBRARY_BUILT
-        COMMAND_ERROR_IS_FATAL ANY
-)
+add_custom_command(OUTPUT run_impurityModel.c COMMAND cp ${PROJECT_SOURCE_DIR}/src/run_impurityModel.h . COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/library_builder.py )
 
-execute_process(
-        COMMAND ${Python3_EXECUTABLE} -m pip install ${PIP_USER} ${PROJECT_SOURCE_DIR}
-        COMMAND_ERROR_IS_FATAL ANY
-)
+if (${NODEPS})
+        set(PIP_NODEPS "--no-deps")
+else()
+        set(PIP_NODEPS)
+endif()
 
-Python3_add_library(${PROJECT_NAME} SHARED ${PROJECT_SOURCE_DIR}/src/run_impurityModel.c)
-target_include_directories(${PROJECT_NAME} PRIVATE  ${PROJECT_SOURCE_DIR}/src)
+if (${EDITABLE_DEPS})
+        set(PIP_EDITABLE_DEPS "--editable --src ${PROJECT_SOURCE_DIR}/dependencies/")
+else()
+        set(PIP_EDITABLE_DEPS )
+endif()
+
+
+add_custom_target(PYTHON_MODULE COMMAND ${Python3_EXECUTABLE} -m pip install --src ${PROJECT_SOURCE_DIR} ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
+
+Python3_add_library(${PROJECT_NAME} SHARED run_impurityModel.c)
+# target_include_directories(${PROJECT_NAME} PRIVATE  ${PROJECT_SOURCE_DIR}/src)
+add_dependencies(${PROJECT_NAME} PYTHON_MODULE)
+
+install(TARGETS ${PROJECT_NAME})
