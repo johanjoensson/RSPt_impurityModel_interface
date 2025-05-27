@@ -37,41 +37,6 @@ from impurityModel.ed.edchain import tridiagonalize, edchains, haverkort_chain
 from impurityModel.ed.selfenergy import calc_selfenergy
 
 
-def get_hyb_chain(w, V0, H_bath):
-    n_orb = V0.shape[1]
-    assert H_bath.shape[0] % V0.shape[0] == 0
-    I = np.identity(n_orb, dtype=complex)
-    wI = w[:, np.newaxis, np.newaxis] * I[np.newaxis, :, :]
-    hyb = wI - H_bath[np.newaxis, -n_orb:, -n_orb:]
-    for i in range(H_bath.shape[0] // n_orb - 1, 0, -1):
-        hyb[:] = (
-            wI
-            - H_bath[
-                np.newaxis, (i - 1) * n_orb : i * n_orb, (i - 1) * n_orb : i * n_orb
-            ]
-            - H_bath[
-                np.newaxis, (i - 1) * n_orb : i * n_orb, i * n_orb : (i + 1) * n_orb
-            ]
-            @ np.linalg.solve(
-                hyb,
-                H_bath[
-                    np.newaxis, i * n_orb : (i + 1) * n_orb, (i - 1) * n_orb : i * n_orb
-                ],
-            )
-        )
-    return np.conj(V0.T)[np.newaxis, :, :] @ np.linalg.solve(hyb, V0[np.newaxis, :, :])
-
-
-def kth_diag_indices(m, k):
-    rows, cols = np.diag_indices_from(m)
-    if k < 0:
-        return rows[-k:], cols[:k]
-    elif k > 0:
-        return rows[:-k], cols[k:]
-    else:
-        return rows, cols
-
-
 def matrix_print(matrix, label=None):
     if label is not None:
         print(label)
@@ -120,6 +85,7 @@ def parse_solver_line(solver_line):
         "bath_geometry": "star",
         "occ_restrict": True,
         "occ_cutoff": 1e-6,
+        "dN": None,
         "chain_restrict": True,
         "truncation_threshold": int(1e8),
         "slater_min": np.sqrt(np.finfo(float).eps),
@@ -169,6 +135,9 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "slater_min":
                 options["slater_min"] = float(solver_array[i + 1])
                 skip_next = True
+            elif arg.lower() == "dn":
+                options["dN"] = int(solver_array[i + 1])
+                skip_next = True
             else:
                 raise RuntimeError(
                     f"Unknown solver parameter {arg}.\n"
@@ -176,6 +145,8 @@ def parse_solver_line(solver_line):
                 )
     if options["bath_geometry"] == "star":
         options["chain_restrict"] = False
+        if options["dN"] is None:
+            options["dN"] = 2
 
     print(
         f"Nominal imp. occupation   |> {nominal_occ}\n"
@@ -190,6 +161,7 @@ def parse_solver_line(solver_line):
         f"Fitting weight factor     |> {options['weight']}\n"
         f"Occupation restrictions   |> {options['occ_restrict']}\n"
         f"Occupation cutoff         |> {options['occ_cutoff']}\n"
+        f"dN                        |> {options['dN']}\n"
         f"Chain occ. restrictions   |> {options['chain_restrict']}\n"
         f"Minimal Slater weight     |> {options['slater_min']}\n"
         f"Truncation threshold      |> {options['truncation_threshold']}\n",
@@ -383,20 +355,6 @@ def run_impmod_ed(
         assert len(dc_array) == 1
         peak_position = float(dc_array[0])
 
-        # dc_struct = dcStruct(
-        #     nominal_occ=nominal_occ,
-        #     impurity_orbitals={0: [block[0] for block in imp_bath_blocks]},
-        #     bath_states=(
-        #         {0: [block[1] for block in imp_bath_blocks]},
-        #         {0: [block[2] for block in imp_bath_blocks]},
-        #     ),
-        #     u4=u4,
-        #     peak_position=peak_position,
-        #     dc_guess=sig_dc,
-        #     spin_flip_dj=options["spin_flip_dj"],
-        #     tau=tau,
-        # )
-
         try:
             sig_dc[:, :] = fixed_peak_dc(
                 h_op,
@@ -459,6 +417,7 @@ def run_impmod_ed(
                 occ_cutoff=options["occ_cutoff"],
                 truncation_threshold=options["truncation_threshold"],
                 slaterWeightMin=options["slater_min"],
+                dN=options["dN"],
             )
             if comm.rank == 0:
                 sig_static[:, :] = results["sigma_static"]
@@ -942,7 +901,7 @@ def fit_hyb(
         weight_fun,
     )
 
-    #### Do the fit
+    # Do the fit
     for inequivalent_block_i, block_i in enumerate(block_structure.inequivalent_blocks):
         if states_per_inequivalent_block[inequivalent_block_i] == 0:
             continue
