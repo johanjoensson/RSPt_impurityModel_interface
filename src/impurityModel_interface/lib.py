@@ -346,6 +346,23 @@ def run_impmod_ed(
         extra_verbose=(verbosity >= 2),
         comm=comm,
     )
+    if options["blocked"]:
+        block_structure = build_block_structure(hyb, h_dft)
+        for imp_bath_block, block in zip(imp_bath_blocks, block_structure.blocks):
+            assert imp_bath_block[0] == block
+    else:
+        block_structure = BlockStructure(
+            [list(range(h_dft.shape[0]))],
+            [[0]],
+            [[]],
+            [[]],
+            [[]],
+            [0],
+        )
+        imp_orbs = [orb for block in imp_bath_blocks for orb in block[0]]
+        occ_orbs = [orb for block in imp_bath_blocks for orb in block[1]]
+        empty_orbs = [orb for block in imp_bath_blocks for orb in block[2]]
+        imp_bath_blocks = [(imp_orbs, occ_orbs, empty_orbs)]
 
     if rspt_dc_flag == 1:
         dc_line = ffi.string(rspt_dc_line, 100).decode("ascii")
@@ -389,7 +406,7 @@ def run_impmod_ed(
     else:
 
         try:
-            block_structure = build_block_structure(hyb, h_dft)
+
             print("", flush=verbosity >= 2, end="")
             results = calc_selfenergy(
                 h0=h_op,
