@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
 dependencies = [
+"cffi",
 "impurityModel @ git+https://github.com/johanjoensson/impurityModel.git"
 ]
 dynamic = ["version"]
