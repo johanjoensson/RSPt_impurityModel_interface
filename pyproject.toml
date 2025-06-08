@@ -11,6 +11,10 @@ license = "MIT"
 license-files = ["LICEN[CS]E*"]
 dependencies = [
 "cffi",
+"numpy",
+"scipy",
+"h5py",
+"mpi4py",
 "impurityModel @ git+https://github.com/johanjoensson/impurityModel.git"
 ]
 dynamic = ["version"]
