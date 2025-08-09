@@ -1016,7 +1016,7 @@ def fit_hyb(
             for ib in block_structure.inequivalent_blocks
         ]
     if x_lim is not None:
-        mask = np.logical_and(w >= x_lim[0], w <= x_lim[1])
+        mask = np.logical_and(x_lim[0] <= w, w < x_lim[1])
     else:
         mask = np.array([True] * len(w))
 
