@@ -85,6 +85,7 @@ def parse_solver_line(solver_line):
         "bath_geometry": "star",
         "occ_cutoff": 1e-6,
         "dN": None,
+        "mv": None,
         "chain_restrict": True,
         "truncation_threshold": int(1e8),
         "slater_min": np.sqrt(np.finfo(float).eps),
@@ -135,6 +136,9 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "dn":
                 options["dN"] = int(solver_array[i + 1])
                 skip_next = True
+            elif arg.lower() == "mv":
+                options["mv"] = int(solver_array[i + 1])
+                skip_next = True
             else:
                 raise RuntimeError(
                     f"Unknown solver parameter {arg}.\n"
@@ -158,6 +162,7 @@ def parse_solver_line(solver_line):
         f"Fitting weight factor     |> {options['weight']}\n"
         f"Occupation cutoff         |> {options['occ_cutoff']}\n"
         f"dN                        |> {options['dN']}\n"
+        f"Mixed valence             |> {options['mv']}\n"
         f"Chain occ. restrictions   |> {options['chain_restrict']}\n"
         f"Minimal Slater weight     |> {options['slater_min']}\n"
         f"Truncation threshold      |> {options['truncation_threshold']}\n",
@@ -319,6 +324,9 @@ def run_impmod_ed(
 
     (nominal_occ, bath_states_per_orbital, options) = parse_solver_line(solver_line)
     nominal_occ = {0: nominal_occ}
+    mixed_valence = None
+    if options["mv"] is not None:
+        mixed_valence = {0: options["mv"]}
     if any(n0 > n_orb for n0 in nominal_occ.values()) or any(
         n0 < 0 for n0 in nominal_occ.values()
     ):
@@ -326,6 +334,7 @@ def run_impmod_ed(
             f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]"
         )
 
+    hdf5_filename = "impurityModel_data.h5"
     h_op, imp_bath_blocks, v, H_bath = get_ed_h0(
         h_dft,
         hyb,
@@ -341,7 +350,7 @@ def run_impmod_ed(
         valence_bath_only=not options["fit_unocc"],
         bath_geometry=options["bath_geometry"],
         label=label.strip(),
-        save_baths_and_hopping=rspt_dc_flag == 1,
+        hdf5_filename=hdf5_filename,
         verbose=(verbosity >= 1 or rspt_dc_flag == 1),
         extra_verbose=(verbosity >= 2),
         comm=comm,
@@ -376,6 +385,7 @@ def run_impmod_ed(
             sig_dc[:, :] = fixed_peak_dc(
                 h_op,
                 N0=nominal_occ,
+                mixed_valence=mixed_valence,
                 impurity_orbitals={0: [block[0] for block in imp_bath_blocks]},
                 bath_states=(
                     {0: [block[1] for block in imp_bath_blocks]},
@@ -415,6 +425,7 @@ def run_impmod_ed(
                 w=w,
                 delta=eim,
                 nominal_occ=nominal_occ,
+                mixed_valence=mixed_valence,
                 impurity_orbitals={0: [block[0] for block in imp_bath_blocks]},
                 bath_states=(
                     {0: [block[1] for block in imp_bath_blocks]},
@@ -460,16 +471,20 @@ def run_impmod_ed(
                 opt.pop("reort", None)
                 if opt["dN"] is None:
                     opt.pop("dN", None)
-                with h5.File("impurityModel_data.h5", "a") as f:
+                if opt["mv"] is None:
+                    opt.pop("mv", None)
+                with h5.File(hdf5_filename, "a") as f:
                     if "last iteration" not in f.attrs:
                         f.attrs["last iteration"] = 1
                     it = f.attrs["last iteration"]
 
-                    while f"{label.strip()} {it}" in f:
-                        it += 1
-                        f.attrs["last iteration"] = it
+                    # while f"{label.strip()} {it}" in f:
+                    #     it += 1
+                    # f.attrs["last iteration"] = it
 
-                    cluster_g = f.create_group(f"{label.strip()} {it}")
+                    if f"{label.strip()} {it}" not in f:
+                        f.create_group(f"{label.strip()} {it}")
+                    cluster_g = f[f"{label.strip()} {it}"]
                     cluster_g.attrs.update(opt)
                     cluster_g.attrs["tau"] = tau
                     cluster_g.attrs["delta"] = eim
@@ -629,7 +644,7 @@ def get_ed_h0(
     valence_bath_only=True,
     bath_geometry="star",
     label=None,
-    save_baths_and_hopping=False,
+    hdf5_filename="impurityModel_data.h5",
     verbose=True,
     extra_verbose=False,
     comm=None,
@@ -681,7 +696,7 @@ def get_ed_h0(
         weight_w0,
         exp_weight,
         label,
-        save_baths_and_hopping,
+        hdf5_filename,
         verbose,
         extra_verbose,
         comm,
@@ -738,9 +753,7 @@ def get_ed_h0(
         print("DFT hamiltonian, with star geometry baths, in correlated basis")
         matrix_print(H_tmp)
         print("=" * 80)
-        with open(
-            f"Ham-{label}{'-dc' if save_baths_and_hopping else ''}.inp", "w"
-        ) as f:
+        with open(f"Ham-{label}.inp", "w") as f:
             for i in range(H_tmp.shape[0]):
                 for j in range(H_tmp.shape[1]):
                     f.write(
@@ -767,53 +780,65 @@ def fit_hyb_star(
     weight_w0,
     exp_weight,
     label,
-    save_baths_and_hopping,
+    hdf5_filename,
     verbose,
     verbose_extra,
     comm,
 ):
     vs_star = None
     ebs_star = None
-    bath_hopping_filename = f"{environ.get('RSPT_SCRATCH', '.')}/impurityModel_bath_energies_and_hopping_parameters_{label}.npy"
-    if comm.rank == 0:
+    read_hopping = False
+    if comm is None or comm.rank == 0:
         # Check to see if we have already done a fit
         vs_star = []
         ebs_star = []
         try:
-            with open(
-                bath_hopping_filename,
-                "rb",
-            ) as f:
-                n_block = np.load(f)
-                for _ in range(n_block):
-                    vs_star.append(np.load(f))
-                    ebs_star.append(np.load(f))
-            remove(bath_hopping_filename)
-        except FileNotFoundError:
+            with h5.File(
+                hdf5_filename,
+                "r",
+            ) as ar:
+                it = None
+                if "last iteration" in ar.attrs:
+                    it = ar.attrs["last iteration"]
+                if it is None or "tau" in ar[f"{label} {it}"].attrs:
+                    vs_star = None
+                    ebs_star = None
+                else:
+                    print(f"Reading hopping parameters")
+                    for block_index in block_structure.inequivalent_blocks:
+                        vs_star.append(
+                            np.array(ar[f"{label} {it}/Bath fit/vs_star/{block_index}"])
+                        )
+                        ebs_star.append(
+                            np.array(
+                                ar[f"{label} {it}/Bath fit/ebs_star/{block_index}"]
+                            )
+                        )
+                    read_hopping = True
+        except (FileNotFoundError, KeyError):
             vs_star = None
             ebs_star = None
-        except ValueError:
-            remove(bath_hopping_filename)
-            vs_star = None
-            ebs_star = None
+    if comm is not None:
+        ebs_star = comm.bcast(ebs_star, root=0)
+        vs_star = comm.bcast(vs_star, root=0)
     if ebs_star is not None and verbose:
-        print("Read bath energies and hopping parameters")
-
-    ebs_star, vs_star = fit_hyb(
-        w,
-        eim,
-        phase_hyb,
-        bath_states_per_orbital,
-        block_structure,
-        gamma=gamma,
-        imag_only=imag_only,
-        x_lim=(w[0], 0 if valence_bath_only else w[-1]),
-        verbose=verbose,
-        comm=comm,
-        weight_fun=get_weight_function(weight_function, weight_w0, exp_weight),
-        ebs_guess=ebs_star,
-        vs_guess=vs_star,
-    )
+        print("Read bath energies and hopping parameters", flush=True)
+    else:
+        ebs_star, vs_star = fit_hyb(
+            w,
+            eim,
+            phase_hyb,
+            bath_states_per_orbital,
+            block_structure,
+            gamma=gamma,
+            imag_only=imag_only,
+            x_lim=(w[0], 0 if valence_bath_only else w[-1]),
+            verbose=verbose,
+            comm=comm,
+            weight_fun=get_weight_function(weight_function, weight_w0, exp_weight),
+            ebs_guess=ebs_star,
+            vs_guess=vs_star,
+        )
     for ebss, vss in zip(ebs_star, vs_star):
         if len(ebss) == 0:
             continue
@@ -834,13 +859,37 @@ def fit_hyb_star(
                 print(f"{eb_i: 9.6f}:  ", "  ".join(f"{val: 9.6f}" for val in vb_i))
             print("")
         print("=" * 80)
-    if save_baths_and_hopping or True:
-        if comm is None or comm.rank == 0:
-            with open(bath_hopping_filename, "wb") as f:
-                np.save(f, len(vs_star))
-                for i in range(len(vs_star)):
-                    np.save(f, vs_star[i])
-                    np.save(f, ebs_star[i])
+    if (comm is None or comm.rank == 0) and not read_hopping:
+        with h5.File(
+            hdf5_filename,
+            "a",
+        ) as ar:
+            if "last iteration" not in ar.attrs:
+                ar.attrs["last iteration"] = 1
+            it = ar.attrs["last iteration"]
+            while f"{label.strip()} {it}" in ar:
+                it += 1
+            ar.attrs["last iteration"] = it
+
+            if f"{label} {it}" not in ar:
+                ar.create_group(f"{label} {it}")
+            if f"{label} {it}/Bath fit" not in ar:
+                ar.create_group(f"{label} {it}/Bath fit")
+            if f"{label} {it}/Bath fit/vs_star" not in ar:
+                ar.create_group(f"{label} {it}/Bath fit/vs_star")
+            if f"{label} {it}/Bath fit/ebs_star" not in ar:
+                ar.create_group(f"{label} {it}/Bath fit/ebs_star")
+            for i, block_index in enumerate(block_structure.inequivalent_blocks):
+                if f"{block_index}" in ar[f"{label} {it}/Bath fit/vs_star"]:
+                    del ar[f"{label} {it}/Bath fit/vs_star/{block_index}"]
+                if f"{block_index}" in ar[f"{label} {it}/Bath fit/ebs_star"]:
+                    del ar[f"{label} {it}/Bath fit/ebs_star/{block_index}"]
+                ar[f"{label} {it}/Bath fit/vs_star"].create_dataset(
+                    f"{block_index}", data=vs_star[i]
+                )
+                ar[f"{label} {it}/Bath fit/ebs_star"].create_dataset(
+                    f"{block_index}", data=ebs_star[i]
+                )
     return ebs_star, vs_star, block_structure
 
 
