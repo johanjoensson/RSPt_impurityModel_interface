@@ -335,7 +335,15 @@ def run_impmod_ed(
         )
 
     hdf5_filename = "impurityModel_data.h5"
-    h_op, imp_bath_blocks, v, H_bath = get_ed_h0(
+    (
+        h_op,
+        impurity_indices,
+        valence_bath_indices,
+        conduction_bath_indices,
+        block_structure,
+        v,
+        H_bath,
+    ) = get_ed_h0(
         h_dft,
         hyb,
         corr_to_cf,
@@ -355,23 +363,22 @@ def run_impmod_ed(
         extra_verbose=(verbosity >= 2),
         comm=comm,
     )
-    if options["blocked"]:
-        block_structure = build_block_structure(hyb, h_dft)
-        for imp_bath_block, block in zip(imp_bath_blocks, block_structure.blocks):
-            assert imp_bath_block[0] == block
-    else:
+    if not options.get("blocked", True):
+        impurity_indices = [sorted(orb for block in impurity_indices for orb in block)]
+        valence_bath_indices = [
+            sorted(orb for block in valence_bath_indices for orb in block)
+        ]
+        conduction_bath_indices = [
+            sorted(orb for block in conduction_bath_indices for orb in block)
+        ]
         block_structure = BlockStructure(
-            [list(range(h_dft.shape[0]))],
+            impurity_indices,
             [[0]],
             [[]],
             [[]],
             [[]],
             [0],
         )
-        imp_orbs = [orb for block in imp_bath_blocks for orb in block[0]]
-        occ_orbs = [orb for block in imp_bath_blocks for orb in block[1]]
-        empty_orbs = [orb for block in imp_bath_blocks for orb in block[2]]
-        imp_bath_blocks = [(imp_orbs, occ_orbs, empty_orbs)]
 
     if rspt_dc_flag == 1:
         dc_line = ffi.string(rspt_dc_line, 100).decode("ascii")
@@ -386,10 +393,10 @@ def run_impmod_ed(
                 h_op,
                 N0=nominal_occ,
                 mixed_valence=mixed_valence,
-                impurity_orbitals={0: [block[0] for block in imp_bath_blocks]},
+                impurity_orbitals={0: impurity_indices},
                 bath_states=(
-                    {0: [block[1] for block in imp_bath_blocks]},
-                    {0: [block[2] for block in imp_bath_blocks]},
+                    {0: valence_bath_indices},
+                    {0: conduction_bath_indices},
                 ),
                 u4=u4,
                 peak_position=peak_position,
@@ -426,10 +433,10 @@ def run_impmod_ed(
                 delta=eim,
                 nominal_occ=nominal_occ,
                 mixed_valence=mixed_valence,
-                impurity_orbitals={0: [block[0] for block in imp_bath_blocks]},
+                impurity_orbitals={0: impurity_indices},
                 bath_states=(
-                    {0: [block[1] for block in imp_bath_blocks]},
-                    {0: [block[2] for block in imp_bath_blocks]},
+                    {0: valence_bath_indices},
+                    {0: conduction_bath_indices},
                 ),
                 tau=tau,
                 verbosity=verbosity,
@@ -466,7 +473,6 @@ def run_impmod_ed(
             comm.Bcast(sig, root=0)
 
             if comm.rank == 0:
-                print(f"{imp_bath_blocks=}")
                 opt = options.copy()
                 opt.pop("reort", None)
                 if opt["dN"] is None:
@@ -526,24 +532,23 @@ def run_impmod_ed(
                     )
                     ibb_g = cluster_g.create_group("Impurity bath blocks")
                     ibb_g.attrs["Num blocks"] = len(block_structure.blocks)
-                    ib_g = ibb_g.create_group("Impurity orbitals")
-                    for i, imp_bath_block in enumerate(imp_bath_blocks):
-                        for orbs in enumerate(imp_bath_block[0]):
-                            if len(block) == 0:
-                                continue
-                            ib_g.create_dataset(f"{i}", data=block)
-                    ib_g = ibb_g.create_group("Valence baths")
-                    for i, imp_bath_block in enumerate(imp_bath_blocks):
-                        for orbs in imp_bath_block[1]:
-                            if len(block) == 0:
-                                continue
-                            ib_g.create_dataset(f"{i}", data=block)
-                    ib_g = ibb_g.create_group("Conduction baths")
-                    for i, imp_bath_block in enumerate(imp_bath_blocks):
-                        for orbs in imp_bath_block[2]:
-                            if len(block) == 0:
-                                continue
-                            ib_g.create_dataset(f"{i}", data=block)
+                    imp_orb_g = ibb_g.create_group("Impurity orbitals")
+                    val_orb_g = ibb_g.create_group("Valence baths")
+                    con_orb_g = ibb_g.create_group("Conduction baths")
+                    for i, (
+                        impurity_block,
+                        valence_block,
+                        conduction_block,
+                    ) in enumerate(
+                        zip(
+                            impurity_indices,
+                            valence_bath_indices,
+                            conduction_bath_indices,
+                        )
+                    ):
+                        imp_orb_g.create_dataset(f"{i}", data=impurity_block)
+                        val_orb_g.create_dataset(f"{i}", data=valence_block)
+                        con_orb_g.create_dataset(f"{i}", data=conduction_block)
 
                     cluster_g.create_dataset("H DFT", data=h_dft)
                     cluster_g.create_dataset("H bath", data=H_bath)
@@ -701,8 +706,6 @@ def get_ed_h0(
         extra_verbose,
         comm,
     )
-    n_valence_block = [np.sum(eb < 0) for i, eb in enumerate(ebs_star)]
-    n_conduction_block = [np.sum(eb >= 0) for i, eb in enumerate(ebs_star)]
     H_bath, v = build_H_bath_v(
         H_dft,
         ebs_star,
@@ -759,12 +762,20 @@ def get_ed_h0(
                     f.write(
                         f" 0 0 0 {i+1} {j+1} {np.real(H_tmp[i, j])} {np.imag(H_tmp[i, j])}\n"
                     )
-    imp_bath_blocks = build_imp_bath_blocks(
-        H, block_structure, n_valence_block, n_conduction_block, n_orb
+    impurity_indices, valence_bath_indices, conduction_bath_indices, block_structure = (
+        build_imp_bath_blocks(H, n_orb)
     )
 
     h_op = finite.matrixToIOp(H)
-    return h_op, imp_bath_blocks, v, H_bath
+    return (
+        h_op,
+        impurity_indices,
+        valence_bath_indices,
+        conduction_bath_indices,
+        block_structure,
+        v,
+        H_bath,
+    )
 
 
 def fit_hyb_star(
@@ -967,62 +978,20 @@ def build_H_bath_v(
     return H_bath / comm.size, v / comm.size
 
 
-def build_imp_bath_blocks(
-    H, block_structure, n_valence_block, n_conduction_block, n_orb
-):
+def build_imp_bath_blocks(H, n_orb):
+    block_structure = build_block_structure(H)
+    impurity_indices = [None] * len(block_structure.blocks)
     occupied_indices = [None] * len(block_structure.blocks)
     unoccupied_indices = [None] * len(block_structure.blocks)
-    for inequiv_i, block_i in enumerate(block_structure.inequivalent_blocks):
-        for identical_block in block_structure.identical_blocks[block_i]:
-            occupied_indices[identical_block] = list(range(n_valence_block[inequiv_i]))
-            unoccupied_indices[identical_block] = list(
-                range(n_conduction_block[inequiv_i])
-            )
-        for transposed_block in block_structure.transposed_blocks[block_i]:
-            occupied_indices[transposed_block] = list(range(n_valence_block[inequiv_i]))
-            unoccupied_indices[transposed_block] = list(
-                range(n_conduction_block[inequiv_i])
-            )
-        for particle_hole_block in block_structure.particle_hole_blocks[block_i]:
-            occupied_indices[particle_hole_block] = list(
-                range(n_valence_block[inequiv_i])
-            )
-            unoccupied_indices[particle_hole_block] = list(
-                range(n_conduction_block[inequiv_i])
-            )
-        for (
-            particle_hole_transpose_block
-        ) in block_structure.particle_hole_transposed_blocks[block_i]:
-            occupied_indices[particle_hole_transpose_block] = list(
-                range(n_valence_block[inequiv_i])
-            )
-            unoccupied_indices[particle_hole_transpose_block] = list(
-                range(n_conduction_block[inequiv_i])
-            )
-    offset = n_orb
-    for i in range(len(block_structure.blocks)):
-        occupied_indices[i] = [index + offset for index in occupied_indices[i]]
-        offset += len(occupied_indices[i])
-        unoccupied_indices[i] = [index + offset for index in unoccupied_indices[i]]
-        offset += len(unoccupied_indices[i])
-    occupied_indices = {i for block in occupied_indices for i in block}
-    unoccupied_indices = {i for block in unoccupied_indices for i in block}
-
-    imp_bath_mask = np.abs(H) > 1e-6
-
-    n_blocks, block_idxs = connected_components(
-        csgraph=csr_matrix(imp_bath_mask), directed=False, return_labels=True
-    )
-    blocks = [[] for _ in range(n_blocks)]
-    for orb_i, block_i in enumerate(block_idxs):
-        blocks[block_i].append(orb_i)
-    imp_bath_blocks = [None] * n_blocks
-    for block_i, bath_block in enumerate(blocks):
-        imp_orbs = [i for i in bath_block if i in range(n_orb)]
-        occ_baths = [i for i in bath_block if i in occupied_indices]
-        empty_baths = [i for i in bath_block if i in unoccupied_indices]
-        imp_bath_blocks[block_i] = (imp_orbs, occ_baths, empty_baths)
-    return imp_bath_blocks
+    for block_i, orbs in enumerate(block_structure.blocks):
+        bath_orbs = {orb for orb in orbs if orb >= n_orb}
+        impurity_orbs = set(orbs) - bath_orbs
+        impurity_indices[block_i] = sorted(impurity_orbs)
+        occupied_indices[block_i] = {orb for orb in bath_orbs if H[orb, orb] < 0}
+        unoccupied_indices[block_i] = sorted(bath_orbs - occupied_indices[block_i])
+        occupied_indices[block_i] = sorted(occupied_indices[block_i])
+        orbs[:] = impurity_indices[block_i]
+    return impurity_indices, occupied_indices, unoccupied_indices, block_structure
 
 
 def fit_hyb(
