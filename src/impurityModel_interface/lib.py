@@ -803,7 +803,6 @@ def fit_hyb_star(
     label,
     hdf5_filename,
     verbose,
-    verbose_extra,
     comm,
 ):
     vs_star = None
