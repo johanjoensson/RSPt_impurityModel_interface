@@ -487,10 +487,6 @@ def run_impmod_ed(
                         f.attrs["last iteration"] = 1
                     it = f.attrs["last iteration"]
 
-                    # while f"{label.strip()} {it}" in f:
-                    #     it += 1
-                    # f.attrs["last iteration"] = it
-
                     if f"{label.strip()} {it}" not in f:
                         f.create_group(f"{label.strip()} {it}")
                     cluster_g = f[f"{label.strip()} {it}"]
@@ -557,6 +553,10 @@ def run_impmod_ed(
                     cluster_g.create_dataset("H bath", data=H_bath)
                     cluster_g.create_dataset("V", data=v)
                     cluster_g.create_dataset("U", data=u4)
+                    cluster_g.create_dataset(
+                        "thermal_rho", data=results["thermal_rho"]
+                    ),
+                    cluster_g.create_dataset("rhos", data=results["rhos"]),
                     cluster_g.create_dataset("Sigma Static", data=sig_static)
                     cluster_g.create_dataset("Sigma real", data=sig_real_python)
                     cluster_g.create_dataset("Sigma Matsubara", data=sig_python)
@@ -591,20 +591,6 @@ def run_impmod_ed(
                         )
                         block_g.create_dataset(
                             "Gimp real", data=results["gs_realaxis"][i]
-                        )
-                        block_g.create_dataset(
-                            "impurity rho", data=results["rho_imps"][0][i]
-                        )
-                        block_g.create_dataset(
-                            "bath rho", data=results["rho_baths"][0][i]
-                        )
-                        block_g.create_dataset(
-                            "thermal average impurity rho",
-                            data=results["thermal_rho_imps"][0][i],
-                        )
-                        block_g.create_dataset(
-                            "thermal average bath rho",
-                            data=results["thermal_rho_baths"][0][i],
                         )
                         block_g.create_dataset(
                             "Sigma Matsubara", data=results["sigma"][i]
@@ -715,6 +701,7 @@ def get_ed_h0(
         bath_geometry,
         block_structure,
         verbose,
+        extra_verbose,
     )
     H_bath, v = build_full_bath(H_baths, vs, block_structure)
     if comm is not None:
