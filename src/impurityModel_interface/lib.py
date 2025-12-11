@@ -36,22 +36,7 @@ from impurityModel.ed.manybody_basis import CIPSI_Basis
 from impurityModel.ed.selfenergy import fixed_peak_dc
 from impurityModel.ed.edchain import build_H_bath_v, build_imp_bath_blocks
 from impurityModel.ed.selfenergy import calc_selfenergy
-
-
-def matrix_print(matrix, label=None):
-    if label is not None:
-        print(label)
-    if matrix.size == 0:
-        print("")
-        return
-    print(
-        "\n".join(
-            [
-                " ".join([f"{np.real(el): .6f} {np.imag(el):+.6f}j" for el in row])
-                for row in matrix
-            ]
-        )
-    )
+from impurityModel.ed.utils import matrix_print
 
 
 def parse_solver_line(solver_line):
@@ -85,11 +70,13 @@ def parse_solver_line(solver_line):
         "spin_flip_dj": False,
         "bath_geometry": "star",
         "occ_cutoff": 1e-6,
-        "dN": None,
+        "occ_restrict": False,
+        "dN": 2,
         "mv": None,
-        "chain_restrict": True,
+        "chain_restrict": False,
         "truncation_threshold": int(1e8),
         "slater_min": np.sqrt(np.finfo(float).eps),
+        "collapse_chains": False,
     }
     if len(solver_array) > 2:
         skip_next = False
@@ -123,6 +110,8 @@ def parse_solver_line(solver_line):
                 skip_next = True
             elif arg.lower() == "spin_flip_dj":
                 options["spin_flip_dj"] = True
+            elif arg.lower() == "occ_restrict":
+                options["occ_restrict"] = True
             elif arg.lower() == "no_chain_restrict":
                 options["chain_restrict"] = False
             elif arg.lower() == "occ_cutoff":
@@ -147,8 +136,12 @@ def parse_solver_line(solver_line):
                 )
     if options["bath_geometry"] == "star":
         options["chain_restrict"] = False
+        options["collapse_chains"] = True
+        options["occ_restrict"] = True
         if options["dN"] is None:
             options["dN"] = 2
+    if not options["occ_restrict"]:
+        options["dN"] = None
 
     print(
         f"Nominal imp. occupation   |> {nominal_occ}\n"
@@ -162,6 +155,7 @@ def parse_solver_line(solver_line):
         f"Fitting weight function   |> {options['weight_function']}\n"
         f"Fitting weight factor     |> {options['weight']}\n"
         f"Occupation cutoff         |> {options['occ_cutoff']}\n"
+        f"Occupation restrictions   |> {options['occ_restrict']}\n"
         f"dN                        |> {options['dN']}\n"
         f"Mixed valence             |> {options['mv']}\n"
         f"Chain occ. restrictions   |> {options['chain_restrict']}\n"
@@ -722,6 +716,19 @@ def get_ed_h0(
         print(f"----> Impurity orbitals: {n_orb}")
         print(f"----> Bath orbitals: {H_bath.shape[0]}")
 
+    H_bath_star, v_star = build_full_bath(
+        [np.diag(eb) for eb in ebs_star], vs_star, block_structure
+    )
+    H_tmp = np.zeros(
+        (n_orb + H_bath_star.shape[0], n_orb + H_bath_star.shape[0]), dtype=complex
+    )
+    H_tmp[:n_orb, :n_orb] = corr_to_cf @ H_dft @ np.conj(corr_to_cf).T
+    H_tmp[n_orb:, n_orb:] = H_bath_star
+    H_tmp[n_orb:, :n_orb] = v_star @ np.conj(Q.T) @ np.conj(corr_to_cf).T
+    H_tmp[:n_orb, n_orb:] = np.conj(H_tmp[n_orb:, :n_orb].T)
+    assert np.allclose(
+        np.linalg.eigvalsh(H), np.linalg.eigvalsh(H_tmp)
+    ), "Eigenvalues have changed!"
     if extra_verbose:
         print("DFT hamiltonian, with baths, in CF basis")
         matrix_print(H)
@@ -741,16 +748,6 @@ def get_ed_h0(
                 label,
             )
 
-        H_bath_star, v_star = build_full_bath(
-            [np.diag(eb) for eb in ebs_star], vs_star, block_structure
-        )
-        H_tmp = np.zeros(
-            (n_orb + H_bath_star.shape[0], n_orb + H_bath_star.shape[0]), dtype=complex
-        )
-        H_tmp[:n_orb, :n_orb] = corr_to_cf @ H_dft @ np.conj(corr_to_cf).T
-        H_tmp[n_orb:, n_orb:] = H_bath_star
-        H_tmp[n_orb:, :n_orb] = v_star @ np.conj(Q.T) @ np.conj(corr_to_cf).T
-        H_tmp[:n_orb, n_orb:] = np.conj(H_tmp[n_orb:, :n_orb].T)
         print()
         print("DFT hamiltonian, with star geometry baths, in correlated basis")
         matrix_print(H_tmp)
