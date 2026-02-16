@@ -1,5 +1,12 @@
 from os import devnull, remove, environ
 
+if "OMP_NUM_THREADS" in environ and int(environ["OMP_NUM_THREADS"]) > 1:
+    print(
+        "Warning, OMP parallelization can cause the eigensystem solvers to hang indefinitely."
+    )
+    print("Therefore OMP_NUM_THREADS will be forcefully set to 1 from now on!.")
+    environ["OMP_NUM_THREADS"] = "1"
+
 import traceback
 import sys
 import pickle
@@ -19,6 +26,7 @@ from rspt2spectra.hyb_fit import fit_hyb
 from impurityModel.ed.block_structure import (
     BlockStructure,
     build_block_structure,
+    print_block_structure,
 )
 from impurityModel.ed.greens_function import (
     save_Greens_function,
@@ -71,9 +79,9 @@ def parse_solver_line(solver_line):
         "bath_geometry": "star",
         "occ_cutoff": 1e-6,
         "occ_restrict": False,
-        "dN": 2,
+        "dN": 4,
         "mv": None,
-        "chain_restrict": False,
+        "chain_restrict": True,
         "truncation_threshold": int(1e8),
         "slater_min": np.sqrt(np.finfo(float).eps),
         "collapse_chains": False,
@@ -289,8 +297,6 @@ def run_impmod_ed(
         )
         corr_to_cf[:, :n_rot_cols] = rspt_corr_to_cf_arr
         corr_to_cf[:, n_rot_cols:] = np.roll(rspt_corr_to_cf_arr, n_rot_cols, axis=0)
-    # Rotate the U-matrix to the CF basis
-    u4 = rotate_4index_U(u4, corr_to_cf)
     # impurityModel uses a weird convention for the U-matrix
     u4 = np.moveaxis(u4, 1, 0)
 
@@ -299,9 +305,9 @@ def run_impmod_ed(
     sig_real_python = np.moveaxis(sig_real, -1, 0)
     hyb = np.moveaxis(hyb, -1, 0)
 
-    # Rotate hybridization function and DFT hamiltonian to the CF basis
     hyb = rotate_Greens_function(hyb, corr_to_cf)
     h_dft = rotate_matrix(h_dft, corr_to_cf)
+    u4 = rotate_4index_U(u4, corr_to_cf)
 
     stdout_save = sys.stdout
     if rank == 0:
@@ -340,8 +346,8 @@ def run_impmod_ed(
         H_bath,
     ) = get_ed_h0(
         h_dft,
+        0 if rspt_dc_flag == 1 else sig_dc,
         hyb,
-        corr_to_cf,
         bath_states_per_orbital,
         w,
         eim,
@@ -366,6 +372,7 @@ def run_impmod_ed(
         conduction_bath_indices = [
             sorted(orb for block in conduction_bath_indices for orb in block)
         ]
+        original_block_structure = block_structure
         block_structure = BlockStructure(
             impurity_indices,
             [[0]],
@@ -421,7 +428,6 @@ def run_impmod_ed(
 
         try:
 
-            print("", flush=verbosity >= 2, end="")
             results = calc_selfenergy(
                 h0=h_op,
                 u4=u4,
@@ -438,6 +444,7 @@ def run_impmod_ed(
                 tau=tau,
                 verbosity=verbosity,
                 block_structure=block_structure,
+                # rot_to_spherical=corr_to_spherical,
                 rot_to_spherical=np.conj(corr_to_cf.T) @ corr_to_spherical,
                 cluster_label=label.strip(),
                 comm=comm,
@@ -460,6 +467,7 @@ def run_impmod_ed(
                 )
 
                 # Rotate self energy from CF basis to RSPt's corr basis
+                # u = np.identity(corr_to_cf.shape[0])
                 u = np.conj(corr_to_cf.T)
                 sig_python[:, :, :] = rotate_Greens_function(sig_python, u)
                 sig_real_python[:, :, :] = rotate_Greens_function(sig_real_python, u)
@@ -491,6 +499,7 @@ def run_impmod_ed(
                     cluster_g.create_dataset("Matsubara frequency mesh", data=iw)
                     cluster_g.create_dataset(
                         "Rot to spherical",
+                        # data=corr_to_spherical,
                         data=np.conj(corr_to_cf.T) @ corr_to_spherical,
                     )
                     bs_g = cluster_g.create_group("block structure")
@@ -618,8 +627,8 @@ def run_impmod_ed(
 
 def get_ed_h0(
     H_dft,
+    sig_dc,
     hyb,
-    corr_to_cf,
     bath_states_per_orbital,
     w,
     eim,
@@ -666,7 +675,7 @@ def get_ed_h0(
 
     # We do the fitting by first transforming the hyridization function into a basis
     # where each block is (hopefully) close to diagonal
-    # np.conj(Q.T) @ cf_hyb @ Q is the transformation performed
+    # np.conj(Q.T) @ hyb @ Q is the transformation performed
     phase_hyb, Q = block_diagonalize_hyb(hyb)
 
     block_structure = build_block_structure(phase_hyb, tol=1e-6)
@@ -688,8 +697,11 @@ def get_ed_h0(
         verbose,
         comm,
     )
+    # The double counting was removed from the DFT hamiltonian before calling the solver.
+    # In order to properly set up the linked double chain geometry for the bath states we need to add it back in.
+    # Otherwise we will end up with 2 separate chains that only link to the impurity, not to each other.
     H_baths, vs = build_H_bath_v(
-        H_dft,
+        rotate_matrix(H_dft + sig_dc, Q),
         ebs_star,
         vs_star,
         bath_geometry,
@@ -716,21 +728,28 @@ def get_ed_h0(
         print(f"----> Impurity orbitals: {n_orb}")
         print(f"----> Bath orbitals: {H_bath.shape[0]}")
 
-    H_bath_star, v_star = build_full_bath(
-        [np.diag(eb) for eb in ebs_star], vs_star, block_structure
+    H_baths_star, vs_star = build_H_bath_v(
+        rotate_matrix(H_dft, Q),
+        ebs_star,
+        vs_star,
+        "star",
+        block_structure,
+        verbose,
+        extra_verbose,
     )
+    H_bath_star, v_star = build_full_bath(H_baths_star, vs_star, block_structure)
     H_tmp = np.zeros(
         (n_orb + H_bath_star.shape[0], n_orb + H_bath_star.shape[0]), dtype=complex
     )
-    H_tmp[:n_orb, :n_orb] = corr_to_cf @ H_dft @ np.conj(corr_to_cf).T
+    H_tmp[:n_orb, :n_orb] = H_dft
     H_tmp[n_orb:, n_orb:] = H_bath_star
-    H_tmp[n_orb:, :n_orb] = v_star @ np.conj(Q.T) @ np.conj(corr_to_cf).T
+    H_tmp[n_orb:, :n_orb] = v_star @ np.conj(Q.T)
     H_tmp[:n_orb, n_orb:] = np.conj(H_tmp[n_orb:, :n_orb].T)
     assert np.allclose(
         np.linalg.eigvalsh(H), np.linalg.eigvalsh(H_tmp)
     ), "Eigenvalues have changed!"
     if extra_verbose:
-        print("DFT hamiltonian, with baths, in CF basis")
+        print("DFT hamiltonian, with baths, in solver basis")
         matrix_print(H)
         print("=" * 80)
 
@@ -742,16 +761,17 @@ def get_ed_h0(
                 (v @ np.conj(Q.T))[None, :, :],
             )
             save_Greens_function(
-                rotate_Greens_function(hyb, np.conj(corr_to_cf.T)),
+                hyb,
+                # rotate_Greens_function(hyb, np.conj(corr_to_cf.T)),
                 w,
                 "hyb-fit",
                 label,
             )
 
         print()
-        print("DFT hamiltonian, with star geometry baths, in correlated basis")
+        print("DFT hamiltonian, with star geometry baths, in solver basis")
         matrix_print(H_tmp)
-        print("=" * 80)
+        print("=" * 80, flush=True)
         with open(f"Ham-{label}.inp", "w") as f:
             for i in range(H_tmp.shape[0]):
                 for j in range(H_tmp.shape[1]):
@@ -862,7 +882,10 @@ def fit_hyb_star(
                 f"Energy   :  Hopping  (impurity orbitals {block_structure.blocks[block_structure.inequivalent_blocks[bi]]})"
             )
             for eb_i, vb_i in zip(eb, vb):
-                print(f"{eb_i: 9.6f}:  ", "  ".join(f"{val: 9.6f}" for val in vb_i))
+                print(
+                    f"{eb_i: 9.6f}:  ",
+                    "  ".join(f"{val: 9.6f}" for vb_row in vb_i for val in vb_row),
+                )
             print("")
         print("=" * 80)
     if (comm is None or comm.rank == 0) and not read_hopping:
