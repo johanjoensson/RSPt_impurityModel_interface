@@ -85,6 +85,7 @@ def parse_solver_line(solver_line):
         "truncation_threshold": int(1e8),
         "slater_min": np.sqrt(np.finfo(float).eps),
         "collapse_chains": False,
+        "sparse_green": False,
     }
     if len(solver_array) > 2:
         skip_next = False
@@ -137,6 +138,8 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "mv":
                 options["mv"] = int(solver_array[i + 1])
                 skip_next = True
+            elif arg.lower() == "sparse_green":
+                options["sparse_green"] = True
             else:
                 raise RuntimeError(
                     f"Unknown solver parameter {arg}.\n"
@@ -444,7 +447,6 @@ def run_impmod_ed(
                 tau=tau,
                 verbosity=verbosity,
                 block_structure=block_structure,
-                # rot_to_spherical=corr_to_spherical,
                 rot_to_spherical=np.conj(corr_to_cf.T) @ corr_to_spherical,
                 cluster_label=label.strip(),
                 comm=comm,
@@ -456,6 +458,7 @@ def run_impmod_ed(
                 truncation_threshold=options["truncation_threshold"],
                 slaterWeightMin=options["slater_min"],
                 dN=options["dN"],
+                sparse_green=options["sparse_green"],
             )
             if comm.rank == 0:
                 sig_static[:, :] = results["sigma_static"]
@@ -467,7 +470,6 @@ def run_impmod_ed(
                 )
 
                 # Rotate self energy from CF basis to RSPt's corr basis
-                # u = np.identity(corr_to_cf.shape[0])
                 u = np.conj(corr_to_cf.T)
                 sig_python[:, :, :] = rotate_Greens_function(sig_python, u)
                 sig_real_python[:, :, :] = rotate_Greens_function(sig_real_python, u)
