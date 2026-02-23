@@ -1,14 +1,18 @@
 from os import devnull, remove, environ
+import sys
 
-if "OMP_NUM_THREADS" in environ and int(environ["OMP_NUM_THREADS"]) > 1:
+if "OMP_NUM_THREADS" not in environ or int(environ["OMP_NUM_THREADS"]) != 1:
     print(
-        "Warning, OMP parallelization can cause the eigensystem solvers to hang indefinitely."
+        "Warning, OMP parallelization can cause the eigensystem solvers to hang indefinitely.",
+        file=sys.stderr,
     )
-    print("Therefore OMP_NUM_THREADS will be forcefully set to 1 from now on!.")
+    print(
+        "Therefore OMP_NUM_THREADS will be forcefully set to 1 from now on!.",
+        file=sys.stderr,
+    )
     environ["OMP_NUM_THREADS"] = "1"
 
 import traceback
-import sys
 import pickle
 import numpy as np
 import scipy as sp
@@ -187,7 +191,7 @@ def get_weight_function(weight_function_name, w0, e):
     elif weight_function_name.lower() == "sqrte":
         return lambda w: np.sqrt(np.abs(w - w0)) * np.exp(-e / 2 * np.abs(w - w0) ** 2)
     elif weight_function_name.lower() == "linexp":
-        return lambda w: np.sqrt(np.abs(w - w0)) * np.exp(-e / 2 * np.abs(w - w0) ** 2)
+        return lambda w: np.abs(w - w0) * np.exp(-e / 2 * np.abs(w - w0) ** 2)
     else:
         raise RuntimeError(f"Unknown weight function {weight_function_name}")
     return None
@@ -222,7 +226,7 @@ def run_impmod_ed(
     size_complex,
 ):
     comm = MPI.COMM_WORLD
-    rank = comm.rank
+    rank = comm.rank if comm is not None else 0
 
     label = ffi.string(rspt_label, 18).decode("ascii")
     solver_line = ffi.string(rspt_solver_line, 100).decode("ascii")
@@ -367,6 +371,21 @@ def run_impmod_ed(
         extra_verbose=(verbosity >= 2),
         comm=comm,
     )
+    if verbosity >= 1 and rank == 0:
+        hyb = np.conj(v).T @ np.linalg.solve(
+            (w + 1j * eim)[:, None, None]
+            * np.identity(H_bath.shape[0], dtype=complex)[None, :, :]
+            - H_bath,
+            v,
+            # v[None, :, :],
+        )
+        save_Greens_function(
+            # hyb,
+            rotate_Greens_function(hyb, np.conj(corr_to_cf.T)),
+            w,
+            "hyb-fit",
+            label.strip(),
+        )
     if not options.get("blocked", True):
         impurity_indices = [sorted(orb for block in impurity_indices for orb in block)]
         valence_bath_indices = [
@@ -413,6 +432,8 @@ def run_impmod_ed(
                 rank=rank,
                 verbose=verbosity > 0,
                 dense_cutoff=options["dense_cutoff"],
+                slaterWeightMin=options["slater_min"],
+                truncation_threshold=options["truncation_threshold"],
             )
             er = 0
         except Exception as e:
@@ -731,7 +752,7 @@ def get_ed_h0(
         print(f"----> Bath orbitals: {H_bath.shape[0]}")
 
     H_baths_star, vs_star = build_H_bath_v(
-        rotate_matrix(H_dft, Q),
+        rotate_matrix(H_dft + sig_dc, Q),
         ebs_star,
         vs_star,
         "star",
@@ -755,21 +776,6 @@ def get_ed_h0(
         matrix_print(H)
         print("=" * 80)
 
-        if comm is None or comm.rank == 0:
-            hyb = np.conj(v @ np.conj(Q.T)).T @ np.linalg.solve(
-                (w + 1j * eim)[:, None, None]
-                * np.identity(H_bath.shape[0], dtype=complex)[None, :, :]
-                - H_bath,
-                (v @ np.conj(Q.T))[None, :, :],
-            )
-            save_Greens_function(
-                hyb,
-                # rotate_Greens_function(hyb, np.conj(corr_to_cf.T)),
-                w,
-                "hyb-fit",
-                label,
-            )
-
         print()
         print("DFT hamiltonian, with star geometry baths, in solver basis")
         matrix_print(H_tmp)
@@ -791,7 +797,7 @@ def get_ed_h0(
         valence_bath_indices,
         conduction_bath_indices,
         block_structure,
-        v,
+        v @ np.conj(Q.T),
         H_bath,
     )
 
