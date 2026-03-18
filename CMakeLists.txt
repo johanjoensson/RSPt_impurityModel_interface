@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 
-project(impurityModel_interface VERSION 1.0.0 LANGUAGES C)
+project(impurityModel_interface VERSION 1.0.0 LANGUAGES C CXX)
 
 include(CMakePrintHelpers)
 
