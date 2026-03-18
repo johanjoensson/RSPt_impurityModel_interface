@@ -47,7 +47,8 @@ else()
 endif()
 
 
-add_custom_target(PYTHON_MODULE COMMAND ${Python3_EXECUTABLE} -m pip install --src ${PROJECT_SOURCE_DIR} ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
+# Pass CMAKE compilers and compiler flags on to the installation of dependencies (most importantly impurityModel)
+add_custom_target(PYTHON_MODULE COMMAND CC=${CMAKE_C_COMPILER} CFLAGS=${CMAKE_C_FLAGS} CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=${CMAKE_CXX_FLAGS} ${Python3_EXECUTABLE} -m pip install ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
 
 Python3_add_library(${PROJECT_NAME} SHARED run_impurityModel.c)
 # target_include_directories(${PROJECT_NAME} PRIVATE  ${PROJECT_SOURCE_DIR}/src)
