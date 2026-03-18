@@ -77,6 +77,7 @@ def parse_solver_line(solver_line):
         "reort": Reort.NONE,
         "blocked": True,
         "fit_unocc": False,
+        "gamma": 0.01,
         "weight_function": "gaussian",
         "weight": 2,
         "spin_flip_dj": False,
@@ -111,6 +112,9 @@ def parse_solver_line(solver_line):
                 options["fit_unocc"] = True
             elif arg.lower() == "fit_occ":
                 options["fit_unocc"] = False
+            elif arg.lower() == "gamma":
+                options["gamma"] = float(solver_array[i + 1])
+                skip_next = True
             elif arg.lower() == "dense_cutoff":
                 options["dense_cutoff"] = int(solver_array[i + 1])
                 skip_next = True
@@ -359,7 +363,7 @@ def run_impmod_ed(
         w,
         eim,
         tau,
-        gamma=0.01,
+        gamma=options["gamma"],
         weight_function=options["weight_function"],
         exp_weight=options["weight"],
         imag_only=False,
@@ -720,11 +724,42 @@ def get_ed_h0(
         verbose,
         comm,
     )
+    w_min = w[0]
+    w_max = w[-1]
+    if valence_bath_only:
+        w_max = 0
+    filtered_ebs_star, filtered_vs_star = ([], [])
+    shifts = []
+    for ebs, vs in zip(ebs_star, vs_star):
+        shift = 0
+        filtered_ebs = np.empty((0,), dtype=float)
+        filtered_vs = np.empty((0, vs.shape[1], vs.shape[2]), dtype=vs.dtype)
+        for i in range(ebs.shape[0]):
+            eb = ebs[i]
+            v = vs[i]
+            if w_min <= eb <= w_max:
+                filtered_ebs = np.append(filtered_ebs, eb)
+                filtered_vs = np.append(filtered_vs, [v], axis=0)
+                continue
+            shift += np.conj(v.T) @ v / eb
+        filtered_ebs_star.append(filtered_ebs)
+        filtered_vs_star.append(filtered_vs)
+        shifts.append(shift)
+    ebs_star = filtered_ebs_star
+    vs_star = filtered_vs_star
+
+    H_shift = np.zeros_like(H_dft)
+    for inequiv_block_i, shift in zip(block_structure.inequivalent_blocks, shifts):
+        for block_i in block_structure.identical_blocks[inequiv_block_i]:
+            orbs = block_structure.blocks[block_i]
+            H_shift[np.ix_(orbs, orbs)] = shift
+    if verbose:
+        matrix_print(H_shift, r"Shift of $\Delta(\omega=0)$")
     # The double counting was removed from the DFT hamiltonian before calling the solver.
     # In order to properly set up the linked double chain geometry for the bath states we need to add it back in.
     # Otherwise we will end up with 2 separate chains that only link to the impurity, not to each other.
     H_baths, vs = build_H_bath_v(
-        rotate_matrix(H_dft + sig_dc, Q),
+        rotate_matrix(H_dft + sig_dc, Q) - H_shift,
         ebs_star,
         vs_star,
         bath_geometry,
@@ -741,7 +776,7 @@ def get_ed_h0(
 
     n_orb = H_dft.shape[0]
     H = np.zeros((n_orb + H_bath.shape[0], n_orb + H_bath.shape[0]), dtype=complex)
-    H[:n_orb, :n_orb] = H_dft
+    H[:n_orb, :n_orb] = H_dft - rotate_matrix(H_shift, np.conj(Q.T))
     H[n_orb:, n_orb:] = H_bath
     H[n_orb:, :n_orb] = v @ np.conj(Q.T)
     H[:n_orb, n_orb:] = np.conj(H[n_orb:, :n_orb].T)
@@ -752,7 +787,7 @@ def get_ed_h0(
         print(f"----> Bath orbitals: {H_bath.shape[0]}")
 
     H_baths_star, vs_star = build_H_bath_v(
-        rotate_matrix(H_dft + sig_dc, Q),
+        rotate_matrix(H_dft + sig_dc, Q) - H_shift,
         ebs_star,
         vs_star,
         "star",
@@ -764,7 +799,7 @@ def get_ed_h0(
     H_tmp = np.zeros(
         (n_orb + H_bath_star.shape[0], n_orb + H_bath_star.shape[0]), dtype=complex
     )
-    H_tmp[:n_orb, :n_orb] = H_dft
+    H_tmp[:n_orb, :n_orb] = H_dft - rotate_matrix(H_shift, np.conj(Q.T))
     H_tmp[n_orb:, n_orb:] = H_bath_star
     H_tmp[n_orb:, :n_orb] = v_star @ np.conj(Q.T)
     H_tmp[:n_orb, n_orb:] = np.conj(H_tmp[n_orb:, :n_orb].T)
@@ -865,7 +900,6 @@ def fit_hyb_star(
             bath_states_per_orbital,
             block_structure,
             gamma=gamma,
-            imag_only=imag_only,
             x_lim=(w[0], 0 if valence_bath_only else w[-1]),
             verbose=verbose,
             comm=comm,
