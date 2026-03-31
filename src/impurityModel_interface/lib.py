@@ -26,6 +26,7 @@ mpi4py.rc.initialize = False
 mpi4py.rc.finalize = False
 from mpi4py import MPI
 from rspt2spectra.hyb_fit import fit_hyb
+from rspt2spectra.weight_functions import weight_functions
 
 from impurityModel.ed.block_structure import (
     BlockStructure,
@@ -78,7 +79,7 @@ def parse_solver_line(solver_line):
         "blocked": True,
         "fit_unocc": False,
         "gamma": 0.01,
-        "weight_function": "gaussian",
+        "weight_function": "none",
         "weight": 2,
         "spin_flip_dj": False,
         "bath_geometry": "star",
@@ -120,7 +121,7 @@ def parse_solver_line(solver_line):
                 skip_next = True
             elif arg.lower() == "no_block":
                 options["blocked"] = False
-            elif arg.lower() in {"gaussian", "rspt", "exponential", "sqrte", "linexp"}:
+            elif arg.lower() in weight_functions.keys():
                 options["weight_function"] = arg.lower()
             elif arg.lower() == "weight":
                 options["weight"] = float(solver_array[i + 1])
@@ -186,19 +187,10 @@ def parse_solver_line(solver_line):
 
 
 def get_weight_function(weight_function_name, w0, e):
-    if weight_function_name.lower() == "exponential":
-        return lambda w: np.exp(-e * np.abs(w - w0))
-    elif weight_function_name.lower() == "gaussian":
-        return lambda w: np.exp(-e / 2 * np.abs(w - w0) ** 2)
-    elif weight_function_name.lower() == "rspt":
-        return lambda w: np.abs(w - w0) / (1 + e * np.abs(w - w0)) ** 3
-    elif weight_function_name.lower() == "sqrte":
-        return lambda w: np.sqrt(np.abs(w - w0)) * np.exp(-e / 2 * np.abs(w - w0) ** 2)
-    elif weight_function_name.lower() == "linexp":
-        return lambda w: np.abs(w - w0) * np.exp(-e / 2 * np.abs(w - w0) ** 2)
-    else:
-        raise RuntimeError(f"Unknown weight function {weight_function_name}")
-    return None
+    """
+    Get the weight function matching the weight function name
+    """
+    return weight_functions[weight_function_name](w0, e)
 
 
 @ffi.def_extern()
@@ -662,7 +654,7 @@ def get_ed_h0(
     tau,
     gamma=0.001,
     exp_weight=2,
-    weight_function="Gaussian",
+    weight_function="none",
     weight_w0=0,
     imag_only=False,
     valence_bath_only=True,
