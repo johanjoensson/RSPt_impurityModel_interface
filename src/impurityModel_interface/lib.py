@@ -79,7 +79,7 @@ def parse_solver_line(solver_line):
         "blocked": True,
         "fit_unocc": False,
         "gamma": 0.01,
-        "weight_function": "none",
+        "weight_function": "unit",
         "weight": 2,
         "spin_flip_dj": False,
         "bath_geometry": "star",
@@ -152,7 +152,7 @@ def parse_solver_line(solver_line):
             else:
                 raise RuntimeError(
                     f"Unknown solver parameter {arg}.\n"
-                    f"--->Other solver params {solver_array[5:]}"
+                    f"--->Other solver params {solver_array[2:]}"
                 )
     if options["bath_geometry"] == "star":
         options["chain_restrict"] = False
@@ -300,12 +300,17 @@ def run_impmod_ed(
         )
         corr_to_cf[:, :n_rot_cols] = rspt_corr_to_cf_arr
         corr_to_cf[:, n_rot_cols:] = np.roll(rspt_corr_to_cf_arr, n_rot_cols, axis=0)
+    comm.Bcast(corr_to_spherical)
+    comm.Bcast(corr_to_cf)
+    comm.Bcast(h_dft)
+    comm.Bcast(u4)
     # impurityModel uses a weird convention for the U-matrix
     u4 = np.moveaxis(u4, 1, 0)
 
     # For python, it makes more sense to put the frequency index first, instead of last
     sig_python = np.moveaxis(sig, -1, 0)
     sig_real_python = np.moveaxis(sig_real, -1, 0)
+    comm.Bcast(hyb)
     hyb = np.moveaxis(hyb, -1, 0)
 
     hyb = rotate_Greens_function(hyb, corr_to_cf)
@@ -716,10 +721,12 @@ def get_ed_h0(
         verbose,
         comm,
     )
-    w_min = w[0]
-    w_max = w[-1]
+    trace_phase_hyb = np.sum(np.diagonal(phase_hyb, axis1=1, axis2=2), axis=1)
+    w_min = w[np.argmax(np.abs(trace_phase_hyb) > 1e-6)]
+    w_max = w[-(np.argmax(np.abs(trace_phase_hyb)[::-1] > 1e-6) + 1)]
+
     if valence_bath_only:
-        w_max = 0
+        w_max = min(0, w_max)
     filtered_ebs_star, filtered_vs_star = ([], [])
     shifts = []
     for ebs, vs in zip(ebs_star, vs_star):
@@ -744,7 +751,7 @@ def get_ed_h0(
     for inequiv_block_i, shift in zip(block_structure.inequivalent_blocks, shifts):
         for block_i in block_structure.identical_blocks[inequiv_block_i]:
             orbs = block_structure.blocks[block_i]
-            H_shift[np.ix_(orbs, orbs)] = shift
+            # H_shift[np.ix_(orbs, orbs)] = shift
     if verbose:
         matrix_print(H_shift, r"Shift of $\Delta(\omega=0)$")
     # The double counting was removed from the DFT hamiltonian before calling the solver.
@@ -761,10 +768,12 @@ def get_ed_h0(
     )
     H_bath, v = build_full_bath(H_baths, vs, block_structure)
     if comm is not None:
-        comm.Allreduce(MPI.IN_PLACE, H_bath, op=MPI.SUM)
-        H_bath /= comm.size
-        comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
-        v /= comm.size
+        comm.Bcast(H_bath)
+        comm.Bcast(v)
+        # comm.Allreduce(MPI.IN_PLACE, H_bath, op=MPI.SUM)
+        # H_bath /= comm.size
+        # comm.Allreduce(MPI.IN_PLACE, v, op=MPI.SUM)
+        # v /= comm.size
 
     n_orb = H_dft.shape[0]
     H = np.zeros((n_orb + H_bath.shape[0], n_orb + H_bath.shape[0]), dtype=complex)
@@ -885,6 +894,9 @@ def fit_hyb_star(
     if ebs_star is not None and verbose:
         print("Read bath energies and hopping parameters", flush=True)
     elif ebs_star is None:
+        trace_phase_hyb = np.sum(np.diagonal(phase_hyb, axis1=1, axis2=2), axis=1)
+        w_min = w[np.argmax(np.abs(trace_phase_hyb) > 1e-6)]
+        w_max = w[-(np.argmax(np.abs(trace_phase_hyb)[::-1] > 1e-6) + 1)]
         ebs_star, vs_star = fit_hyb(
             w,
             eim,
@@ -892,7 +904,7 @@ def fit_hyb_star(
             bath_states_per_orbital,
             block_structure,
             gamma=gamma,
-            x_lim=(w[0], 0 if valence_bath_only else w[-1]),
+            x_lim=(w_min, min(0, w_max) if valence_bath_only else w_max),
             verbose=verbose,
             comm=comm,
             weight_fun=get_weight_function(weight_function, weight_w0, exp_weight),
