@@ -740,7 +740,10 @@ def get_ed_h0(
                 filtered_ebs = np.append(filtered_ebs, eb)
                 filtered_vs = np.append(filtered_vs, [v], axis=0)
                 continue
-            shift += np.conj(v.T) @ v / eb
+            # G0 = [wI - H - Delta]^-1 = [wI - H + s(0) - (Delta + s(0))]^-1
+            # Delta = sum_i 1/(w-e_i)Vi^+Vi + 1/(w-e_s)Vs^+Vs = \tilde{Delta} - s
+            # s(0) = 1/e_s Vs^+Vs
+            shift += np.conj(v.T) @ v * (eb / (eb**2 + eim**2))
         filtered_ebs_star.append(filtered_ebs)
         filtered_vs_star.append(filtered_vs)
         shifts.append(shift)
