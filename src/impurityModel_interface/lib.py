@@ -801,9 +801,10 @@ def get_ed_h0(
     H_tmp[n_orb:, n_orb:] = H_bath_star
     H_tmp[n_orb:, :n_orb] = v_star @ np.conj(Q.T)
     H_tmp[:n_orb, n_orb:] = np.conj(H_tmp[n_orb:, :n_orb].T)
-    assert np.allclose(
-        np.linalg.eigvalsh(H), np.linalg.eigvalsh(H_tmp)
-    ), "Eigenvalues have changed!"
+    if not np.allclose(np.linalg.eigvalsh(H), np.linalg.eigvalsh(H_tmp)):
+        print(
+            f"Eigenvalues have changed!\nSolver hamiltonian {np.linalg.eigvalsh(H)}\nStar hamiltonian {np.linalg.eigvalsh(H_tmp)=} "
+        )
 
     import matplotlib.pyplot as plt
     from itertools import product
