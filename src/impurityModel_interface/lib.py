@@ -45,8 +45,6 @@ from impurityModel.ed.greens_function import (
     rotate_matrix,
     rotate_4index_U,
 )
-from impurityModel.ed.manybody_basis import CIPSI_Basis
-from impurityModel.ed.selfenergy import fixed_peak_dc
 from impurityModel.ed.edchain import build_H_bath_v, build_imp_bath_blocks
 from impurityModel.ed.selfenergy import calc_selfenergy
 from impurityModel.ed.utils import matrix_print
@@ -54,7 +52,7 @@ from impurityModel.ed.utils import matrix_print
 
 def parse_solver_line(solver_line):
     """
-    N0 dN dVal dCon Nbath [[pro, full] [dense_cutoff 50] [no_block], [fit_unocc] [weight 2]]
+    N0 dN dVal dCon Nbath [[periodic, pro, selective, full] [dense_cutoff 1000] [no_block], [fit_unocc] [weight 2]]
     """
     # Remove comments from the solver line
     solver_line = solver_line.split("!")[0]
@@ -84,8 +82,7 @@ def parse_solver_line(solver_line):
         "spin_flip_dj": False,
         "bath_geometry": "star",
         "occ_cutoff": 1e-6,
-        "occ_restrict": False,
-        "dN": 4,
+        "dN": None,
         "mv": None,
         "chain_restrict": True,
         "truncation_threshold": int(1e8),
@@ -100,13 +97,15 @@ def parse_solver_line(solver_line):
                 skip_next = False
                 continue
             arg = solver_array[i]
-            if arg.lower() in {"pro", "full", "periodic"}:
+            if arg.lower() in {"pro", "selective", "full", "periodic"}:
                 if arg.lower() == "pro":
                     options["reort"] = Reort.PARTIAL
-                elif arg.lower() == "full":
-                    options["reort"] = Reort.FULL
+                elif arg.lower() == "selective":
+                    options["reort"] = Reort.SELECTIVE
                 elif arg.lower() == "periodic":
                     options["reort"] = Reort.PERIODIC
+                elif arg.lower() == "full":
+                    options["reort"] = Reort.FULL
             elif arg.lower() in {"star", "chain", "haver"}:
                 options["bath_geometry"] = arg.lower()
             elif arg.lower() == "fit_unocc":
@@ -128,8 +127,6 @@ def parse_solver_line(solver_line):
                 skip_next = True
             elif arg.lower() == "spin_flip_dj":
                 options["spin_flip_dj"] = True
-            elif arg.lower() == "occ_restrict":
-                options["occ_restrict"] = True
             elif arg.lower() == "no_chain_restrict":
                 options["chain_restrict"] = False
             elif arg.lower() == "occ_cutoff":
@@ -157,11 +154,8 @@ def parse_solver_line(solver_line):
     if options["bath_geometry"] == "star":
         options["chain_restrict"] = False
         options["collapse_chains"] = True
-        options["occ_restrict"] = True
         if options["dN"] is None:
-            options["dN"] = 2
-    if not options["occ_restrict"]:
-        options["dN"] = None
+            options["dN"] = 4
 
     print(
         f"Nominal imp. occupation   |> {nominal_occ}\n"
@@ -175,7 +169,6 @@ def parse_solver_line(solver_line):
         f"Fitting weight function   |> {options['weight_function']}\n"
         f"Fitting weight factor     |> {options['weight']}\n"
         f"Occupation cutoff         |> {options['occ_cutoff']}\n"
-        f"Occupation restrictions   |> {options['occ_restrict']}\n"
         f"dN                        |> {options['dN']}\n"
         f"Mixed valence             |> {options['mv']}\n"
         f"Chain occ. restrictions   |> {options['chain_restrict']}\n"
@@ -331,7 +324,7 @@ def run_impmod_ed(
     else:
         sys.stdout = open(devnull, "w")
 
-    (nominal_occ, bath_states_per_orbital, options) = parse_solver_line(solver_line)
+    nominal_occ, bath_states_per_orbital, options = parse_solver_line(solver_line)
     nominal_occ = {0: nominal_occ}
     mixed_valence = None
     if options["mv"] is not None:
@@ -372,6 +365,81 @@ def run_impmod_ed(
         extra_verbose=(verbosity >= 2),
         comm=comm,
     )
+    if comm.rank == 0:
+        opt = options.copy()
+        opt["reort"] = "None"
+        opt["dN"] = "None"
+        opt["mv"] = "None"
+        with h5.File(hdf5_filename, "a") as f:
+            if "last iteration" not in f.attrs:
+                f.attrs["last iteration"] = 1
+            it = f.attrs["last iteration"]
+
+            if f"{label.strip()} {it}" not in f:
+                f.create_group(f"{label.strip()} {it}")
+            cluster_g = f[f"{label.strip()} {it}"]
+            cluster_g.attrs.update(opt)
+            cluster_g.attrs["tau"] = tau
+            cluster_g.attrs["delta"] = eim
+            cluster_g.create_dataset("Real frequency mesh", data=w)
+            cluster_g.create_dataset("Matsubara frequency mesh", data=iw)
+            cluster_g.create_dataset(
+                "Rot to spherical",
+                # data=corr_to_spherical,
+                data=np.conj(corr_to_cf.T) @ corr_to_spherical,
+            )
+            bs_g = cluster_g.create_group("block structure")
+            bs_g.attrs["Num blocks"] = len(block_structure.blocks)
+            b_g = bs_g.create_group("Blocks")
+            for i, block in enumerate(block_structure.blocks):
+                b_g.create_dataset(f"{i}", data=block)
+            b_g = bs_g.create_group("Identical blocks")
+            for i, block in enumerate(block_structure.identical_blocks):
+                if len(block) == 0:
+                    continue
+                b_g.create_dataset(f"{i}", data=block)
+            b_g = bs_g.create_group("Transposed blocks")
+            for i, block in enumerate(block_structure.transposed_blocks):
+                if len(block) == 0:
+                    continue
+                b_g.create_dataset(f"{i}", data=block)
+            b_g = bs_g.create_group("Particle hole blocks")
+            for i, block in enumerate(block_structure.particle_hole_blocks):
+                if len(block) == 0:
+                    continue
+                b_g.create_dataset(f"{i}", data=block)
+            b_g = bs_g.create_group("Particle hole transposed blocks")
+            for i, block in enumerate(block_structure.particle_hole_transposed_blocks):
+                if len(block) == 0:
+                    continue
+                b_g.create_dataset(f"{i}", data=block)
+            bs_g.create_dataset(
+                "Inequivalent blocks", data=block_structure.inequivalent_blocks
+            )
+            ibb_g = cluster_g.create_group("Impurity bath blocks")
+            ibb_g.attrs["Num blocks"] = len(block_structure.blocks)
+            imp_orb_g = ibb_g.create_group("Impurity orbitals")
+            val_orb_g = ibb_g.create_group("Valence baths")
+            con_orb_g = ibb_g.create_group("Conduction baths")
+            for i, (
+                impurity_block,
+                valence_block,
+                conduction_block,
+            ) in enumerate(
+                zip(
+                    impurity_indices,
+                    valence_bath_indices,
+                    conduction_bath_indices,
+                )
+            ):
+                imp_orb_g.create_dataset(f"{i}", data=impurity_block)
+                val_orb_g.create_dataset(f"{i}", data=valence_block)
+                con_orb_g.create_dataset(f"{i}", data=conduction_block)
+
+            cluster_g.create_dataset("H DFT", data=h_dft)
+            cluster_g.create_dataset("H bath", data=H_bath)
+            cluster_g.create_dataset("V", data=v)
+            cluster_g.create_dataset("U", data=u4)
     if verbosity >= 1 and rank == 0:
         hyb = np.conj(v).T @ np.linalg.solve(
             (w + 1j * eim)[:, None, None]
@@ -502,84 +570,9 @@ def run_impmod_ed(
             comm.Bcast(sig, root=0)
 
             if comm.rank == 0:
-                opt = options.copy()
-                opt.pop("reort", None)
-                if opt["dN"] is None:
-                    opt.pop("dN", None)
-                if opt["mv"] is None:
-                    opt.pop("mv", None)
                 with h5.File(hdf5_filename, "a") as f:
-                    if "last iteration" not in f.attrs:
-                        f.attrs["last iteration"] = 1
                     it = f.attrs["last iteration"]
-
-                    if f"{label.strip()} {it}" not in f:
-                        f.create_group(f"{label.strip()} {it}")
                     cluster_g = f[f"{label.strip()} {it}"]
-                    cluster_g.attrs.update(opt)
-                    cluster_g.attrs["tau"] = tau
-                    cluster_g.attrs["delta"] = eim
-                    cluster_g.create_dataset("Real frequency mesh", data=w)
-                    cluster_g.create_dataset("Matsubara frequency mesh", data=iw)
-                    cluster_g.create_dataset(
-                        "Rot to spherical",
-                        # data=corr_to_spherical,
-                        data=np.conj(corr_to_cf.T) @ corr_to_spherical,
-                    )
-                    bs_g = cluster_g.create_group("block structure")
-                    bs_g.attrs["Num blocks"] = len(block_structure.blocks)
-                    b_g = bs_g.create_group("Blocks")
-                    for i, block in enumerate(block_structure.blocks):
-                        b_g.create_dataset(f"{i}", data=block)
-                    b_g = bs_g.create_group("Identical blocks")
-                    for i, block in enumerate(block_structure.identical_blocks):
-                        if len(block) == 0:
-                            continue
-                        b_g.create_dataset(f"{i}", data=block)
-                    b_g = bs_g.create_group("Transposed blocks")
-                    for i, block in enumerate(block_structure.transposed_blocks):
-                        if len(block) == 0:
-                            continue
-                        b_g.create_dataset(f"{i}", data=block)
-                    b_g = bs_g.create_group("Particle hole blocks")
-                    for i, block in enumerate(block_structure.particle_hole_blocks):
-                        if len(block) == 0:
-                            continue
-                        b_g.create_dataset(f"{i}", data=block)
-                    b_g = bs_g.create_group("Particle hole transposed blocks")
-                    for i, block in enumerate(
-                        block_structure.particle_hole_transposed_blocks
-                    ):
-                        if len(block) == 0:
-                            continue
-                        b_g.create_dataset(f"{i}", data=block)
-                    bs_g.create_dataset(
-                        "Inequivalent blocks", data=block_structure.inequivalent_blocks
-                    )
-                    ibb_g = cluster_g.create_group("Impurity bath blocks")
-                    ibb_g.attrs["Num blocks"] = len(block_structure.blocks)
-                    imp_orb_g = ibb_g.create_group("Impurity orbitals")
-                    val_orb_g = ibb_g.create_group("Valence baths")
-                    con_orb_g = ibb_g.create_group("Conduction baths")
-                    for i, (
-                        impurity_block,
-                        valence_block,
-                        conduction_block,
-                    ) in enumerate(
-                        zip(
-                            impurity_indices,
-                            valence_bath_indices,
-                            conduction_bath_indices,
-                        )
-                    ):
-                        imp_orb_g.create_dataset(f"{i}", data=impurity_block)
-                        val_orb_g.create_dataset(f"{i}", data=valence_block)
-                        con_orb_g.create_dataset(f"{i}", data=conduction_block)
-
-                    cluster_g.create_dataset("H DFT", data=h_dft)
-                    cluster_g.create_dataset("H bath", data=H_bath)
-                    cluster_g.create_dataset("V", data=v)
-                    cluster_g.create_dataset("U", data=u4)
                     cluster_g.create_dataset(
                         "thermal_rho", data=results["thermal_rho"]
                     ),
@@ -731,6 +724,7 @@ def get_ed_h0(
     shifts = []
     for ebs, vs in zip(ebs_star, vs_star):
         shift = 0
+        # shift = np.zeros((vs.shape[1], vs.shape[1]), dtype=complex)
         filtered_ebs = np.empty((0,), dtype=float)
         filtered_vs = np.empty((0, vs.shape[1], vs.shape[2]), dtype=vs.dtype)
         for i in range(ebs.shape[0]):
@@ -810,6 +804,25 @@ def get_ed_h0(
     assert np.allclose(
         np.linalg.eigvalsh(H), np.linalg.eigvalsh(H_tmp)
     ), "Eigenvalues have changed!"
+
+    import matplotlib.pyplot as plt
+    from itertools import product
+
+    if False:
+        fig, ax = plt.subplots(nrows=n_orb, ncols=n_orb, squeeze=False, sharex="all")
+
+        def G0(w, H):
+            return np.linalg.inv((w[:, None, None] * np.eye(H.shape[0])[None] - H))
+
+        w = np.linspace(-1, 1, 1001) + 0.01j
+        G0_star = G0(w, H_tmp)
+        G0_ldc = G0(w, H)
+        for i, j in product(range(n_orb), repeat=2):
+            ax[i, j].plot(w.real, G0_star[:, i, j].imag, label="Star")
+            ax[i, j].plot(w.real, G0_ldc[:, i, j].imag, label="Linked double chain")
+        plt.legend()
+        plt.show()
+
     if extra_verbose:
         print("DFT hamiltonian, with baths, in solver basis")
         matrix_print(H)
