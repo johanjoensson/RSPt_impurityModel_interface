@@ -71,7 +71,11 @@ try:
         build_imp_bath_blocks,
         build_full_bath,
     )
-    from impurityModel.ed.selfenergy import calc_selfenergy, fixed_peak_dc
+    from impurityModel.ed.selfenergy import (
+        calc_selfenergy,
+        fixed_peak_dc,
+        fixed_occupation_dc,
+    )
     from impurityModel.ed.utils import matrix_print
 except ImportError as import_error:
     raise ImportError(
@@ -519,32 +523,58 @@ def run_impmod_ed(
         dc_line = dc_line.split("!")[0]
         dc_line = dc_line.split("#")[0]
         dc_array = dc_line.strip().split()
-        assert (
-            len(dc_array) == 1
-        ), f"impurityModel double counting correction only accepts 1 argument, peak_position. Got options: {dc_array} "
-        peak_position = float(dc_array[0])
-
-        try:
-            dc_cf = fixed_peak_dc(
-                h_op,
-                N0=nominal_occ,
-                mixed_valence=mixed_valence,
-                impurity_orbitals={0: impurity_indices},
-                bath_states=(
-                    {0: valence_bath_indices},
-                    {0: conduction_bath_indices},
-                ),
-                u4=u4,
-                peak_position=peak_position,
-                dc_guess=sig_dc_cf,
-                spin_flip_dj=options["spin_flip_dj"],
-                tau=tau,
-                rank=rank,
-                verbose=verbosity > 0,
-                dense_cutoff=options["dense_cutoff"],
-                slaterWeightMin=options["slater_min"],
-                truncation_threshold=options["truncation_threshold"],
+        # Two double counting criteria:
+        #   <peak_position>        -- place a spectral peak at the given energy
+        #                             (E[N+1]-E[N] if positive, E[N]-E[N-1] if
+        #                             negative)
+        #   occ <occupation>       -- fix the thermal impurity occupation
+        if len(dc_array) > 0 and dc_array[0].lower() in {"occ", "occupation"}:
+            assert len(dc_array) == 2, (
+                "impurityModel occupation double counting takes exactly 1 "
+                f"argument, the target impurity occupation. Got: {dc_array}"
             )
+            dc_mode = "occupation"
+            dc_target = float(dc_array[1])
+        else:
+            assert len(dc_array) == 1, (
+                "impurityModel double counting takes 1 argument, peak_position, "
+                f"or 'occ <target impurity occupation>'. Got: {dc_array}"
+            )
+            dc_mode = "peak"
+            dc_target = float(dc_array[0])
+
+        dc_kwargs = dict(
+            N0=nominal_occ,
+            mixed_valence=mixed_valence,
+            impurity_orbitals={0: impurity_indices},
+            bath_states=(
+                {0: valence_bath_indices},
+                {0: conduction_bath_indices},
+            ),
+            u4=u4,
+            dc_guess=sig_dc_cf,
+            spin_flip_dj=options["spin_flip_dj"],
+            tau=tau,
+            rank=rank,
+            verbose=verbosity > 0,
+            dense_cutoff=options["dense_cutoff"],
+            slaterWeightMin=options["slater_min"],
+            truncation_threshold=options["truncation_threshold"],
+        )
+        try:
+            if dc_mode == "occupation":
+                # Scale the shift search with the real-frequency mesh, so the
+                # steps are sensible in any energy unit (RSPt supplies Ry).
+                bandwidth = w[-1] - w[0]
+                dc_cf = fixed_occupation_dc(
+                    h_op,
+                    occupation=dc_target,
+                    initial_step=bandwidth / 100,
+                    max_shift=bandwidth,
+                    **dc_kwargs,
+                )
+            else:
+                dc_cf = fixed_peak_dc(h_op, peak_position=dc_target, **dc_kwargs)
             # The double counting is calculated in the CF basis, RSPt expects
             # it in the corr basis.
             sig_dc[:, :] = rotate_matrix(dc_cf, np.conj(corr_to_cf.T))
