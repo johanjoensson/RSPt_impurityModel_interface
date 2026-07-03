@@ -53,6 +53,11 @@ dkms.conf
 
 # Vim temporary files
 .*~
+.*.sw?
+*~
+
+# Python bytecode caches
+__pycache__/
 
 # Stuff that CMake builds, but we don't need to track
 src/impurityModel_interface.egg-info/

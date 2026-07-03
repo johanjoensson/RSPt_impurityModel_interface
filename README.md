@@ -7,6 +7,12 @@ configuration. It is usually a good idea to set up some form of virtual
 environment (or conda, or miniconda, or ...) for managing the python
 environment.
 
+Note that `impurityModel` ships a compiled extension (`ManyBodyUtils`) built
+for a specific Python minor version. If you switch Python versions (e.g.
+3.13 -> 3.14), reinstall/rebuild `impurityModel` for the new interpreter,
+otherwise importing this interface fails with an `ImportError` mentioning
+`ManyBodyUtils`.
+
 ## Build instructions
 To build the shared library `libimpurityModel_interface.so` first generate all
 the files, and update your python environment with the command
