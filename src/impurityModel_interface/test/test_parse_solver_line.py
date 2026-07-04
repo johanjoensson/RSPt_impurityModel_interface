@@ -12,12 +12,12 @@ import pytest
 # importing lib (which sets mpi4py.rc.initialize = False).
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: F401
+from rspt2spectra.block_structure import build_block_structure
 
 from impurityModel_interface.lib import (
-    parse_solver_line,
     get_weight_function,
-    build_combined_block_structure,
     h5_write_dataset,
+    parse_solver_line,
 )
 
 
@@ -130,7 +130,7 @@ def test_combined_block_structure_merges_h_coupling():
     phase_hyb[:, 0, 0] = 1.0
     phase_hyb[:, 1, 1] = 2.0
     H_local = np.array([[0.0, 0.5], [0.5, 0.0]], dtype=complex)
-    bs = build_combined_block_structure(phase_hyb, H_local)
+    bs = build_block_structure(phase_hyb, mat=H_local)
     assert bs.blocks == [[0, 1]]
     assert bs.inequivalent_blocks == [0]
 
@@ -141,7 +141,7 @@ def test_combined_block_structure_keeps_disconnected_blocks():
     phase_hyb[:, 0, 0] = 1.0
     phase_hyb[:, 1, 1] = 2.0
     H_local = np.diag([0.0, 1.0]).astype(complex)
-    bs = build_combined_block_structure(phase_hyb, H_local)
+    bs = build_block_structure(phase_hyb, mat=H_local)
     assert bs.blocks == [[0], [1]]
     # Different hybridization and local energies: not equivalent
     assert bs.inequivalent_blocks == [0, 1]
@@ -153,7 +153,7 @@ def test_combined_block_structure_identical_blocks():
     phase_hyb[:, 0, 0] = 1.0
     phase_hyb[:, 1, 1] = 1.0
     H_local = np.diag([0.5, 0.5]).astype(complex)
-    bs = build_combined_block_structure(phase_hyb, H_local)
+    bs = build_block_structure(phase_hyb, mat=H_local)
     assert bs.blocks == [[0], [1]]
     # Same hybridization and local energies: one inequivalent block
     assert bs.inequivalent_blocks == [0]

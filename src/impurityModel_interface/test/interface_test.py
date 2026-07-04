@@ -18,11 +18,11 @@ import pytest
 
 h5 = pytest.importorskip("h5py")
 pytest.importorskip("mpi4py")
-finite = pytest.importorskip("impurityModel.ed.finite")
+api = pytest.importorskip("impurityModel.api")
 
-from mpi4py import MPI
-from impurityModel.ed.selfenergy import calc_selfenergy
-from impurityModel.ed.greens_function import rotate_Greens_function, rotate_matrix
+from impurityModel.api import calc_selfenergy, matrixToIOp  # noqa: E402
+from mpi4py import MPI  # noqa: E402
+from rspt2spectra.utils import rotate_Greens_function, rotate_matrix  # noqa: E402
 
 TEST_DATA = os.environ.get(
     "IMPMOD_INTERFACE_TEST_DATA",
@@ -78,7 +78,7 @@ def test_selfenergy_against_reference():
     mv = options["mv"]
     mixed_valence = None if isinstance(mv, str) else {0: int(mv)}
 
-    h_op = finite.matrixToIOp(data["H_solver"])
+    h_op = matrixToIOp(data["H_solver"])
     results = calc_selfenergy(
         h0=h_op,
         u4=data["u4"],

@@ -1,6 +1,19 @@
 # RSPt_impurityModel_interface
 Interface for running impurityModel from RSPt
 
+## Responsibilities
+This package is glue only: it marshals RSPt's Fortran arrays through CFFI
+(views, no copies), rotates between the correlated and CF bases, parses the
+solver line, keeps the HDF5 archive (including bath-fit reuse between the DC
+and Σ passes of one DMFT step) and drives MPI. The physics lives upstream:
+[rspt2spectra](https://github.com/johanjoensson/rspt2spectra) owns everything
+from the hybridization function to the non-interacting Hamiltonian h0 (block
+partitioning, bath fitting, bath geometries), and
+[impurityModel](https://github.com/johanjoensson/impurityModel) owns the
+many-body ED solve (self-energy, double counting) behind its stable
+`impurityModel.api` façade. The two upstream packages are independent of each
+other; this wrapper is their only meeting point.
+
 ## Requirements
 The idea is that all python requirements will be installed as part of the CMake
 configuration. It is usually a good idea to set up some form of virtual

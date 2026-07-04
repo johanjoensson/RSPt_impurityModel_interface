@@ -1,5 +1,5 @@
-from os import devnull, environ
 import sys
+from os import devnull, environ
 
 if "OMP_NUM_THREADS" not in environ or int(environ["OMP_NUM_THREADS"]) != 1:
     print(
@@ -12,11 +12,13 @@ if "OMP_NUM_THREADS" not in environ or int(environ["OMP_NUM_THREADS"]) != 1:
     )
     environ["OMP_NUM_THREADS"] = "1"
 
-import traceback
 import hashlib
-from importlib.metadata import version as package_version, PackageNotFoundError
-import numpy as np
+import traceback
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+
 import h5py as h5
+import numpy as np
 
 try:
     from run_impurityModel import ffi
@@ -41,42 +43,26 @@ import mpi4py
 
 mpi4py.rc.initialize = False
 mpi4py.rc.finalize = False
-from mpi4py import MPI
-from rspt2spectra.hyb_fit import fit_hyb
-from rspt2spectra.weight_functions import weight_functions
+from mpi4py import MPI  # noqa: E402 - must come after the mpi4py.rc settings above
+from rspt2spectra.h0 import assemble_h0, flatten_star_levels, prepare_hyb_fit  # noqa: E402
+from rspt2spectra.hyb_fit import fit_hyb  # noqa: E402
+from rspt2spectra.utils import (  # noqa: E402
+    rotate_4index_U,
+    rotate_Greens_function,
+    rotate_matrix,
+)
+from rspt2spectra.weight_functions import weight_functions  # noqa: E402
 
 try:
-    from impurityModel.ed.block_structure import (
-        BlockStructure,
-        print_block_structure,
-        get_n_blocks_block_indices_mask,
-        get_identical_blocks,
-        get_transposed_blocks,
-        get_particle_hole_blocks,
-        get_particle_hole_and_transpose_blocks,
-        get_inequivalent_blocks,
-    )
-    from impurityModel.ed.greens_function import (
-        save_Greens_function,
-        block_diagonalize_hyb,
-    )
-    from impurityModel.ed import finite
-    from impurityModel.ed.greens_function import (
-        rotate_Greens_function,
-        rotate_matrix,
-        rotate_4index_U,
-    )
-    from impurityModel.ed.edchain import (
-        build_H_bath_v,
-        build_imp_bath_blocks,
-        build_full_bath,
-    )
-    from impurityModel.ed.selfenergy import (
+    # The stable external surface of the solver; everything under
+    # impurityModel.ed.* is internal.
+    from impurityModel.api import (
         calc_selfenergy,
-        fixed_peak_dc,
         fixed_occupation_dc,
+        fixed_peak_dc,
+        matrixToIOp,
+        save_Greens_function,
     )
-    from impurityModel.ed.utils import matrix_print
 except ImportError as import_error:
     raise ImportError(
         f"Failed to import impurityModel under Python "
@@ -121,9 +107,7 @@ def parse_solver_line(solver_line):
     solver_line = solver_line.split("!")[0]
     solver_line = solver_line.split("#")[0]
     solver_array = solver_line.strip().split()
-    assert (
-        len(solver_array) >= 2
-    ), "The impurityModel ED solver requires at least 2 arguments; N0 nBaths"
+    assert len(solver_array) >= 2, "The impurityModel ED solver requires at least 2 arguments; N0 nBaths"
     try:
         nominal_occ = int(solver_array[0])
         nBaths = int(solver_array[1])
@@ -207,10 +191,7 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "sparse_green":
                 options["sparse_green"] = True
             else:
-                raise RuntimeError(
-                    f"Unknown solver parameter {arg}.\n"
-                    f"--->Other solver params {solver_array[2:]}"
-                )
+                raise RuntimeError(f"Unknown solver parameter {arg}.\n" f"--->Other solver params {solver_array[2:]}")
     if options["bath_geometry"] == "star":
         options["chain_restrict"] = False
         options["collapse_chains"] = True
@@ -310,12 +291,8 @@ def run_impmod_ed(
         order="F",
         dtype=complex,
     )
-    iw = np.ndarray(
-        buffer=ffi.buffer(rspt_iw, n_iw * size_real), shape=(n_iw,), dtype=float
-    )
-    w = np.ndarray(
-        buffer=ffi.buffer(rspt_w, n_w * size_real), shape=(n_w,), dtype=float
-    )
+    iw = np.ndarray(buffer=ffi.buffer(rspt_iw, n_iw * size_real), shape=(n_iw,), dtype=float)
+    w = np.ndarray(buffer=ffi.buffer(rspt_w, n_w * size_real), shape=(n_w,), dtype=float)
     sig = np.ndarray(
         buffer=ffi.buffer(rspt_sig, n_iw * n_orb * n_orb * size_complex),
         shape=(n_orb, n_orb, n_iw),
@@ -360,9 +337,7 @@ def run_impmod_ed(
         corr_to_spherical = np.empty((n_orb, 2 * n_orb_full), dtype=complex)
         corr_to_cf = np.empty((n_orb, n_orb), dtype=complex)
         corr_to_spherical[:, :n_orb_full] = rspt_corr_to_spherical_arr
-        corr_to_spherical[:, n_orb_full:] = np.roll(
-            rspt_corr_to_spherical_arr, n_orb_full, axis=0
-        )
+        corr_to_spherical[:, n_orb_full:] = np.roll(rspt_corr_to_spherical_arr, n_orb_full, axis=0)
         corr_to_cf[:, :n_rot_cols] = rspt_corr_to_cf_arr
         corr_to_cf[:, n_rot_cols:] = np.roll(rspt_corr_to_cf_arr, n_rot_cols, axis=0)
     comm.Bcast(corr_to_spherical)
@@ -401,12 +376,8 @@ def run_impmod_ed(
     mixed_valence = None
     if options["mv"] is not None:
         mixed_valence = {0: options["mv"]}
-    if any(n0 > n_orb for n0 in nominal_occ.values()) or any(
-        n0 < 0 for n0 in nominal_occ.values()
-    ):
-        raise RuntimeError(
-            f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]"
-        )
+    if any(n0 > n_orb for n0 in nominal_occ.values()) or any(n0 < 0 for n0 in nominal_occ.values()):
+        raise RuntimeError(f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]")
 
     if abs(w[1] - w[0]) > eim / 2 and rank == 0:
         print(
@@ -498,9 +469,7 @@ def run_impmod_ed(
             h5_write_dataset(cluster_g, "corr_to_cf", corr_to_cf)
     if verbosity >= 1 and rank == 0:
         hyb_fit = np.conj(v).T @ np.linalg.solve(
-            (w + 1j * eim)[:, None, None]
-            * np.identity(H_bath.shape[0], dtype=complex)[None, :, :]
-            - H_bath,
+            (w + 1j * eim)[:, None, None] * np.identity(H_bath.shape[0], dtype=complex)[None, :, :] - H_bath,
             v,
         )
         # Report the fit quality. Unoccupied states are only fitted with
@@ -581,7 +550,7 @@ def run_impmod_ed(
             er = 0
         except Exception as e:
             print("!" * 100)
-            print(f"Exception {repr(e)} caught on rank {rank}!")
+            print(f"Exception {e!r} caught on rank {rank}!")
             print(traceback.format_exc())
             print(
                 "Adding positive infinity to the imaginary part of the DC selfenergy.",
@@ -625,9 +594,7 @@ def run_impmod_ed(
                 u = np.conj(corr_to_cf.T)
                 sig_static[:, :] = rotate_matrix(results["sigma_static"], u)
                 sig_python[:, :, :] = rotate_Greens_function(results["sigma"], u)
-                sig_real_python[:, :, :] = rotate_Greens_function(
-                    results["sigma_real"], u
-                )
+                sig_real_python[:, :, :] = rotate_Greens_function(results["sigma_real"], u)
 
             comm.Bcast(sig_static, root=0)
             comm.Bcast(sig_real, root=0)
@@ -659,7 +626,7 @@ def run_impmod_ed(
 
         except Exception as e:
             print("!" * 100)
-            print(f"Exception {repr(e)} caught on rank {rank}!")
+            print(f"Exception {e!r} caught on rank {rank}!")
             print(traceback.format_exc())
             print(
                 "Adding positive infinity to the imaginary part of the selfenergy at the last matsubara frequency.",
@@ -676,46 +643,6 @@ def run_impmod_ed(
     sys.stdout = stdout_save
     comm.barrier()
     return er
-
-
-def build_combined_block_structure(phase_hyb, H_local, tol=1e-6):
-    """
-    Build a block structure from the union of the connectivity of the
-    hybridization function and the local hamiltonian.
-
-    The hybridization function and the local hamiltonian do not necessarily
-    share a block structure. The bath geometries (in particular the linked
-    double chain) are anchored on the local hamiltonian block of each
-    hybridization block, so every orbital pair coupled by either the
-    hybridization or the local hamiltonian must end up in the same block.
-    Block equivalence (identical/transposed/particle-hole) is likewise tested
-    against both, since equivalent blocks share one bath fit and one chain
-    construction.
-    """
-    n_blocks, block_idxs = get_n_blocks_block_indices_mask(phase_hyb, H_local, tol=tol)
-    blocks = [[] for _ in range(n_blocks)]
-    for orb_i, block_i in enumerate(block_idxs):
-        blocks[block_i].append(orb_i)
-    identical_blocks = get_identical_blocks(blocks, phase_hyb, H_local, tol=tol)
-    transposed_blocks = get_transposed_blocks(blocks, phase_hyb, H_local, tol=tol)
-    particle_hole_blocks = get_particle_hole_blocks(blocks, phase_hyb, H_local, tol=tol)
-    particle_hole_and_transposed_blocks = get_particle_hole_and_transpose_blocks(
-        blocks, phase_hyb, H_local, tol=tol
-    )
-    inequivalent_blocks = get_inequivalent_blocks(
-        identical_blocks,
-        transposed_blocks,
-        particle_hole_blocks,
-        particle_hole_and_transposed_blocks,
-    )
-    return BlockStructure(
-        blocks,
-        identical_blocks,
-        transposed_blocks,
-        particle_hole_blocks,
-        particle_hole_and_transposed_blocks,
-        inequivalent_blocks,
-    )
 
 
 def get_ed_h0(
@@ -767,27 +694,10 @@ def get_ed_h0(
     eb   -- The bath states used for fitting the hybridization function.
     """
 
-    # We do the fitting by first transforming the hyridization function into a basis
-    # where each block is (hopefully) close to diagonal
-    # np.conj(Q.T) @ hyb @ Q is the transformation performed
-    phase_hyb, Q = block_diagonalize_hyb(hyb)
-
-    # The local hamiltonian in the fitting basis. It anchors the bath geometry
-    # construction, so the block structure must respect its connectivity as
-    # well as that of the hybridization function.
-    H_local_Q = rotate_matrix(H_dft + sig_dc, Q)
-    block_structure = build_combined_block_structure(phase_hyb, H_local_Q, tol=1e-6)
-    # Guaranteed by the union connectivity above; guard against regressions.
-    _off_block = np.abs(H_local_Q.copy())
-    for _orbs in block_structure.blocks:
-        _off_block[np.ix_(_orbs, _orbs)] = 0
-    if np.max(_off_block) > 1e-6:
-        raise RuntimeError(
-            "The local hamiltonian is not block diagonal on the combined "
-            f"block partition. Max off-block element: {np.max(_off_block):.3e}"
-        )
-    if verbose:
-        print_block_structure(block_structure)
+    # rspt2spectra block-diagonalizes the hybridization function, rotates the
+    # local hamiltonian into the same (fitting) basis and builds the block
+    # partition from the union of both connectivities.
+    Q, phase_hyb, H_local_Q, block_structure = prepare_hyb_fit(hyb, H_dft + sig_dc, tol=1e-6, verbose=verbose)
 
     # Fingerprint of the hybridization function, used to decide whether a
     # stored bath fit can be reused (identical hybridization) or the fit has
@@ -811,180 +721,44 @@ def get_ed_h0(
         hyb_fingerprint=hyb_fingerprint,
     )
 
-    H_shift = np.zeros_like(H_dft)
-    for inequiv_block_i, shift in zip(block_structure.inequivalent_blocks, shifts):
-        for block_i in block_structure.identical_blocks[inequiv_block_i]:
-            orbs = block_structure.blocks[block_i]
-            H_shift[np.ix_(orbs, orbs)] = shift
-    if verbose:
-        matrix_print(H_shift, r"Shift of $\Delta(\omega=0)$")
-    # The double counting was removed from the DFT hamiltonian before calling the solver.
-    # In order to properly set up the linked double chain geometry for the bath states we need to add it back in.
-    # Otherwise we will end up with 2 separate chains that only link to the impurity, not to each other.
-    H_baths, vs = build_H_bath_v(
-        H_local_Q - H_shift,
+    # rspt2spectra turns the (flattened) star fit into the requested bath
+    # geometry and assembles the full one-particle Hamiltonian, including the
+    # star-geometry reference used to classify the bath states as
+    # valence/conduction and the star-vs-chain G0 consistency check.
+    (
+        H,
+        _H_star,
+        impurity_indices,
+        valence_bath_indices,
+        conduction_bath_indices,
+        v_solver,
+        H_bath,
+    ) = assemble_h0(
         ebs_star,
         vs_star,
-        bath_geometry,
+        shifts,
+        H_dft,
+        H_local_Q,
+        Q,
         block_structure,
-        verbose,
-        extra_verbose,
-    )
-    H_bath, v = build_full_bath(H_baths, vs, block_structure)
-    if comm is not None:
-        comm.Bcast(H_bath)
-        comm.Bcast(v)
-
-    n_orb = H_dft.shape[0]
-    H = np.zeros((n_orb + H_bath.shape[0], n_orb + H_bath.shape[0]), dtype=complex)
-    H[:n_orb, :n_orb] = H_dft - rotate_matrix(H_shift, np.conj(Q.T))
-    H[n_orb:, n_orb:] = H_bath
-    H[n_orb:, :n_orb] = v @ np.conj(Q.T)
-    H[:n_orb, n_orb:] = np.conj(H[n_orb:, :n_orb].T)
-
-    if verbose:
-        print(f"Total number of spin orbitals: {H.shape[0]}")
-        print(f"----> Impurity orbitals: {n_orb}")
-        print(f"----> Bath orbitals: {H_bath.shape[0]}")
-
-    # The star geometry hamiltonian is needed for classifying bath states as
-    # valence/conduction (the star diagonal holds the bath energies) and for
-    # the isospectrality check of the chain construction.
-    if bath_geometry == "star":
-        # build_H_bath_v with "star" would rebuild exactly H.
-        H_tmp = H
-    else:
-        H_baths_star, vs_star = build_H_bath_v(
-            H_local_Q - H_shift,
-            ebs_star,
-            vs_star,
-            "star",
-            block_structure,
-            verbose,
-            extra_verbose,
-        )
-        H_bath_star, v_star = build_full_bath(H_baths_star, vs_star, block_structure)
-        H_tmp = np.zeros(
-            (n_orb + H_bath_star.shape[0], n_orb + H_bath_star.shape[0]), dtype=complex
-        )
-        H_tmp[:n_orb, :n_orb] = H_dft - rotate_matrix(H_shift, np.conj(Q.T))
-        H_tmp[n_orb:, n_orb:] = H_bath_star
-        H_tmp[n_orb:, :n_orb] = v_star @ np.conj(Q.T)
-        H_tmp[:n_orb, n_orb:] = np.conj(H_tmp[n_orb:, :n_orb].T)
-        if H.shape != H_tmp.shape:
-            # The chain constructions drop bath states that decouple from the
-            # impurity. The uncoupled states are pruned right after the fit,
-            # so a size mismatch here means the valence/conduction
-            # classification below would be invalid.
-            raise RuntimeError(
-                f"The {bath_geometry} bath construction changed the number of "
-                f"bath states ({H_tmp.shape[0] - n_orb} -> {H.shape[0] - n_orb}). "
-                "Cannot classify bath states as valence/conduction."
-            )
-        # The star and chain geometries must describe the same impurity
-        # physics; compare the impurity-projected Green's functions.
-        z_check = w[::10] + 1j * eim
-        G0 = np.linalg.inv(
-            z_check[:, None, None] * np.identity(H.shape[0])[None] - H[None]
-        )[:, :n_orb, :n_orb]
-        G0_star = np.linalg.inv(
-            z_check[:, None, None] * np.identity(H_tmp.shape[0])[None] - H_tmp[None]
-        )[:, :n_orb, :n_orb]
-        if not np.allclose(G0, G0_star, atol=1e-8):
-            warning = (
-                "WARNING: The bath geometry transformation changed the impurity "
-                "Green's function!\n"
-                f"Max abs deviation: {np.max(np.abs(G0 - G0_star)):.3e}"
-            )
-            print(warning, flush=True)
-            # stdout is redirected to a file; make sure the warning is also
-            # visible on the terminal.
-            print(warning, file=sys.stderr, flush=True)
-
-    if extra_verbose:
-        print("DFT hamiltonian, with baths, in solver basis")
-        matrix_print(H)
-        print("=" * 80)
-
-        print()
-        print("DFT hamiltonian, with star geometry baths, in solver basis")
-        matrix_print(H_tmp)
-        print("=" * 80, flush=True)
-        with open(f"Ham-{label}.inp", "w") as f:
-            for i in range(H_tmp.shape[0]):
-                for j in range(H_tmp.shape[1]):
-                    f.write(
-                        f" 0 0 0 {i+1} {j+1} {np.real(H_tmp[i, j])} {np.imag(H_tmp[i, j])}\n"
-                    )
-    impurity_indices, valence_bath_indices, conduction_bath_indices = (
-        build_imp_bath_blocks(H_tmp, n_orb)
+        bath_geometry=bath_geometry,
+        w=w,
+        eim=eim,
+        label=label,
+        verbose=verbose,
+        extra_verbose=extra_verbose,
+        comm=comm,
     )
 
-    h_op = finite.matrixToIOp(H)
+    h_op = matrixToIOp(H)
     return (
         h_op,
         impurity_indices,
         valence_bath_indices,
         conduction_bath_indices,
-        v @ np.conj(Q.T),
+        v_solver,
         H_bath,
         H,
-    )
-
-
-def flatten_star_levels(ebs, vs, coupling_tol=1e-6, verbose=False):
-    r"""
-    Split each fitted bath level into its coupled orbital components.
-
-    A fitted bath level at energy e carries an (n_orb x n_orb) hopping matrix
-    v; the level expands into n_orb degenerate bath orbitals with hopping rows
-    v[b, :]. If v is rank deficient (common when the block structure merges
-    orbitals whose hybridization is block diagonal, e.g. orbitals only coupled
-    through the local hamiltonian), some unitary combinations of the level's
-    bath orbitals decouple from the impurity. The chain constructions
-    (Lanczos) silently drop such decoupled orbitals, which would leave the
-    star and chain geometries with different numbers of bath states and break
-    the positional valence/conduction classification.
-
-    Rotate the degenerate orbitals of each level with the SVD
-    $v = U S W^\dagger$ (the level energy block $e\,\mathbb{1}$ is invariant,
-    the hopping becomes $U^\dagger v = S W^\dagger$) and keep only rows with
-    singular value above coupling_tol. The result is packed in the flat
-    (N, 1, n_orb) form accepted by all bath geometry builders.
-
-    Returns:
-    ebs_flat -- (N,) bath energies, one per kept bath orbital.
-    vs_flat  -- (N, 1, n_orb) hopping rows.
-    """
-    n_imp = vs.shape[2]
-    flat_e = []
-    flat_v = []
-    n_dropped = 0
-    for e, v in zip(ebs, vs):
-        if v.shape[0] == 1:
-            # Already flat; keep the row as is (an SVD would only change the
-            # gauge), just drop it if it is uncoupled.
-            if np.linalg.norm(v[0]) > coupling_tol:
-                flat_e.append(e)
-                flat_v.append(v[0])
-            else:
-                n_dropped += 1
-            continue
-        _, s, wh = np.linalg.svd(v)
-        for s_k, row in zip(s, wh[: len(s)]):
-            if s_k > coupling_tol:
-                flat_e.append(e)
-                flat_v.append(s_k * row)
-            else:
-                n_dropped += 1
-    if n_dropped > 0 and verbose:
-        print(
-            f"Dropped {n_dropped} bath orbitals that do not couple to the "
-            "impurity (rank deficient bath level hopping)."
-        )
-    return (
-        np.array(flat_e, dtype=float),
-        np.array(flat_v, dtype=complex).reshape((len(flat_e), 1, n_imp)),
     )
 
 
@@ -1022,11 +796,9 @@ def fit_hyb_star(
             ) as ar:
                 it = ar.attrs["last iteration"]
                 fit_g = ar[f"{label} {it}/Bath fit"]
-                if fit_g.attrs.get(
-                    "hyb fingerprint", ""
-                ) == hyb_fingerprint and fit_g.attrs.get("block structure", "") == repr(
-                    block_structure
-                ):
+                if fit_g.attrs.get("hyb fingerprint", "") == hyb_fingerprint and fit_g.attrs.get(
+                    "block structure", ""
+                ) == repr(block_structure):
                     print("Reading stored bath energies and hopping parameters")
                     vs_star = []
                     ebs_star = []
@@ -1071,9 +843,7 @@ def fit_hyb_star(
         ebs_star[i], vs_star[i] = flatten_star_levels(
             ebs_star[i][sorted_indices], vs_star[i][sorted_indices], verbose=verbose
         )
-    assert len(vs_star) == len(
-        block_structure.inequivalent_blocks
-    ), "Number of inequivalent blocks is inconsitent"
+    assert len(vs_star) == len(block_structure.inequivalent_blocks), "Number of inequivalent blocks is inconsitent"
 
     if verbose:
         print("Star bath energies and hopping parameters:")
