@@ -6,6 +6,7 @@ include(CMakePrintHelpers)
 
 option(NODEPS "Do not install requirements (impurityModel)" OFF)
 option(EDITABLE_DEPS "Install editable dependencies (impurityModel)" OFF)
+option(PARALLEL_IMPURITYMODEL "Build the threaded version of impurityModel (IMPURITYMODEL_PARALLEL=1)" OFF)
 
 set(Python3_FIND_VIRTUALENV FIRST)
 find_package(Python3 3.2 COMPONENTS Interpreter Development.Embed  REQUIRED)
@@ -46,9 +47,15 @@ else()
         set(PIP_EDITABLE_DEPS )
 endif()
 
+if (${PARALLEL_IMPURITYMODEL})
+        set(IMPURITYMODEL_ENV "IMPURITYMODEL_PARALLEL=1")
+else()
+        set(IMPURITYMODEL_ENV )
+endif()
+
 
 # Pass CMAKE compilers and compiler flags on to the installation of dependencies (most importantly impurityModel)
-add_custom_target(PYTHON_MODULE COMMAND CC=${CMAKE_C_COMPILER} CFLAGS=${CMAKE_C_FLAGS} CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=${CMAKE_CXX_FLAGS} ${Python3_EXECUTABLE} -m pip install ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
+add_custom_target(PYTHON_MODULE COMMAND ${IMPURITYMODEL_ENV} CC=${CMAKE_C_COMPILER} CFLAGS=${CMAKE_C_FLAGS} CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=${CMAKE_CXX_FLAGS} ${Python3_EXECUTABLE} -m pip install ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
 
 Python3_add_library(${PROJECT_NAME} SHARED run_impurityModel.c)
 # target_include_directories(${PROJECT_NAME} PRIVATE  ${PROJECT_SOURCE_DIR}/src)

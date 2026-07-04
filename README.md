@@ -33,3 +33,9 @@ the files, and update your python environment with the command
 library, `libimpurityModel_interface.so` is in the `build` directory. Recompile
 RSPt, add `-DEXTERNAL_ED` flag to `FCPPFLAGS` and `CPPFLAGS` and link with this
 library (`-limpurityModel_interface`).
+
+To build the threaded version of `impurityModel`, configure with
+`-DPARALLEL_IMPURITYMODEL=ON`, i.e.
+`cmake -B build -S . -DPARALLEL_IMPURITYMODEL=ON`. This sets
+`IMPURITYMODEL_PARALLEL=1` when `impurityModel` is built during
+`cmake --build build`.
