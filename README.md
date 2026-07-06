@@ -14,6 +14,21 @@ many-body ED solve (self-energy, double counting) behind its stable
 `impurityModel.api` façade. The two upstream packages are independent of each
 other; this wrapper is their only meeting point.
 
+## Supported orbital representations
+RSPt can define the correlated orbitals in spherical harmonics, crystal-field
+(cubic) combinations — including subsets of a shell such as t2g or eg only —
+user supplied `Irr` projections, and the relativistic JJ basis, with or
+without spin polarization and spin-orbit coupling. The wrapper handles all of
+these: RSPt sends the rotation matrices with one spin block when the
+calculation is neither spin polarized nor relativistic (`nspmat = 1`), and the
+wrapper duplicates that block onto both spins (`reconstruct_rotations` in
+`lib.py`); otherwise the matrices are used as received. The impurityModel ED
+solver requires the cluster to contain exactly one correlated orbital set and
+nothing else. When the correlated set spans only part of a shell, the
+rotation to spherical harmonics is rectangular and impurityModel skips the
+L/S/J observables (everything else, including the self-energy and double
+counting, is unaffected).
+
 ## Requirements
 The idea is that all python requirements will be installed as part of the CMake
 configuration. It is usually a good idea to set up some form of virtual

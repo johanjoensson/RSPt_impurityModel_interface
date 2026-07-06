@@ -113,10 +113,7 @@ def parse_solver_line(solver_line):
         nBaths = int(solver_array[1])
     except Exception as e:
         raise RuntimeError(
-            f"{e}\n"
-            f"--->N0 {solver_array[0]}\n"
-            f"--->Nbaths {solver_array[1]}\n"
-            f"--->Other params {solver_array[2:]}"
+            f"{e}\n--->N0 {solver_array[0]}\n--->Nbaths {solver_array[1]}\n--->Other params {solver_array[2:]}"
         )
     options = {
         "dense_cutoff": 1000,
@@ -191,7 +188,7 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "sparse_green":
                 options["sparse_green"] = True
             else:
-                raise RuntimeError(f"Unknown solver parameter {arg}.\n" f"--->Other solver params {solver_array[2:]}")
+                raise RuntimeError(f"Unknown solver parameter {arg}.\n--->Other solver params {solver_array[2:]}")
     if options["bath_geometry"] == "star":
         options["chain_restrict"] = False
         options["collapse_chains"] = True
@@ -218,6 +215,49 @@ def parse_solver_line(solver_line):
         flush=True,
     )
     return nominal_occ, nBaths, options
+
+
+def reconstruct_rotations(corr_to_spherical_in, corr_to_cf_in, n_orb, n_rot_cols, n_orb_full):
+    """
+    Return (corr_to_spherical, corr_to_cf) with both spin blocks present.
+
+    RSPt dimensions the rotation matrices with nspmat spins (1 for
+    non-spin-polarized calculations without SOC, 2 otherwise), while the
+    hamiltonian, hybridization function and selfenergies always carry both
+    spins (n_orb rows). When only one spin block is sent
+    (n_rot_cols == n_orb/2), duplicate it onto the spin-up block; the
+    correlated basis rows are ordered [spin-down block, spin-up block].
+
+    Parameters:
+    corr_to_spherical_in -- (n_orb, n_orb_full) rotation from the correlated
+                            basis to spherical harmonics, n_orb_full counts
+                            nspmat spins.
+    corr_to_cf_in        -- (n_orb, n_rot_cols) rotation from the correlated
+                            basis to the CF basis, n_rot_cols counts nspmat
+                            spins.
+    n_orb                -- Number of correlated spin-orbitals (2 spins).
+    n_rot_cols           -- Number of CF columns sent by RSPt.
+    n_orb_full           -- Spherical-harmonics dimension sent by RSPt.
+    """
+    if n_rot_cols == n_orb:
+        # The matrices already carry both spins (spin-polarized or SOC).
+        # corr_to_spherical may be rectangular (n_orb < n_orb_full) when the
+        # correlated set is a subset of the shell (e.g. t2g only).
+        return np.array(corr_to_spherical_in), np.array(corr_to_cf_in)
+    if 2 * n_rot_cols == n_orb:
+        n_half = n_orb // 2
+        corr_to_spherical = np.zeros((n_orb, 2 * n_orb_full), dtype=complex)
+        corr_to_spherical[:n_half, :n_orb_full] = corr_to_spherical_in[:n_half, :]
+        corr_to_spherical[n_half:, n_orb_full:] = corr_to_spherical_in[:n_half, :]
+        corr_to_cf = np.zeros((n_orb, n_orb), dtype=complex)
+        corr_to_cf[:n_half, :n_rot_cols] = corr_to_cf_in[:n_half, :]
+        corr_to_cf[n_half:, n_rot_cols:] = corr_to_cf_in[:n_half, :]
+        return corr_to_spherical, corr_to_cf
+    raise RuntimeError(
+        f"Inconsistent rotation shapes from RSPt: n_orb={n_orb}, "
+        f"n_rot_cols={n_rot_cols}, n_orb_full={n_orb_full}; "
+        "expected n_rot_cols == n_orb or 2*n_rot_cols == n_orb."
+    )
 
 
 def get_weight_function(weight_function_name, w0, e):
@@ -330,16 +370,13 @@ def run_impmod_ed(
         dtype=complex,
     )
 
-    if n_rot_cols == n_orb_full and n_orb == n_orb_full:
-        corr_to_spherical = rspt_corr_to_spherical_arr
-        corr_to_cf = rspt_corr_to_cf_arr
-    else:
-        corr_to_spherical = np.empty((n_orb, 2 * n_orb_full), dtype=complex)
-        corr_to_cf = np.empty((n_orb, n_orb), dtype=complex)
-        corr_to_spherical[:, :n_orb_full] = rspt_corr_to_spherical_arr
-        corr_to_spherical[:, n_orb_full:] = np.roll(rspt_corr_to_spherical_arr, n_orb_full, axis=0)
-        corr_to_cf[:, :n_rot_cols] = rspt_corr_to_cf_arr
-        corr_to_cf[:, n_rot_cols:] = np.roll(rspt_corr_to_cf_arr, n_rot_cols, axis=0)
+    corr_to_spherical, corr_to_cf = reconstruct_rotations(
+        rspt_corr_to_spherical_arr,
+        rspt_corr_to_cf_arr,
+        n_orb,
+        n_rot_cols,
+        n_orb_full,
+    )
     comm.Bcast(corr_to_spherical)
     comm.Bcast(corr_to_cf)
     comm.Bcast(h_dft)
@@ -389,6 +426,12 @@ def run_impmod_ed(
     corr_to_cf_dev = np.max(np.abs(corr_to_cf - np.eye(n_orb)))
     if rank == 0:
         print(f"Max abs deviation of corr_to_cf from identity: {corr_to_cf_dev:.3e}")
+        if corr_to_spherical.shape[0] != corr_to_spherical.shape[1]:
+            print(
+                "The correlated orbitals span only part of the shell "
+                f"({corr_to_spherical.shape[0]} of {corr_to_spherical.shape[1]} "
+                "spin-orbitals); the solver will skip the L/S/J observables."
+            )
     # RSPt supplies the double counting in the corr basis, the solver needs it
     # in the CF basis.
     sig_dc_cf = rotate_matrix(sig_dc, corr_to_cf)
@@ -477,8 +520,7 @@ def run_impmod_ed(
         fit_dev = np.max(np.abs(hyb_fit - hyb))
         fit_dev_occ = np.max(np.abs(hyb_fit[w <= 0] - hyb[w <= 0]))
         print(
-            f"Max abs deviation of the fitted hybridization function: "
-            f"{fit_dev_occ:.6f} (w <= 0), {fit_dev:.6f} (all w)"
+            f"Max abs deviation of the fitted hybridization function: {fit_dev_occ:.6f} (w <= 0), {fit_dev:.6f} (all w)"
         )
         save_Greens_function(
             rotate_Greens_function(hyb_fit, np.conj(corr_to_cf.T)),
@@ -561,9 +603,7 @@ def run_impmod_ed(
             er = -1
             comm.Abort(er)
     else:
-
         try:
-
             results = calc_selfenergy(
                 h0=h_op,
                 u4=u4,
