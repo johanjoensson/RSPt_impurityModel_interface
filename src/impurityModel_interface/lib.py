@@ -96,7 +96,7 @@ def parse_solver_line(solver_line):
       spin_flip_dj                         -- Generate spin flipped determinants.
       no_chain_restrict                    -- Disable chain occupation restrictions.
       occ_cutoff X                         -- Occupation cutoff.
-      truncation_threshold N               -- Basis truncation threshold.
+      truncation_threshold N               -- Basis truncation threshold (default: None => automatically determined).
       slater_min X                         -- Minimal Slater determinant weight.
       dn N                                 -- Allowed impurity occupation window (+-dN).
       mv N                                 -- Mixed valence scalar, forwarded per group to
@@ -129,7 +129,7 @@ def parse_solver_line(solver_line):
         "dN": None,
         "mv": None,
         "chain_restrict": True,
-        "truncation_threshold": int(1e8),
+        "truncation_threshold": None,
         "slater_min": np.sqrt(np.finfo(float).eps),
         "collapse_chains": False,
         "sparse_green": False,
@@ -465,10 +465,8 @@ def run_impmod_ed(
         comm=comm,
     )
     if comm.rank == 0:
-        opt = options.copy()
         # h5py cannot store None attributes
-        opt["dN"] = options["dN"] if options["dN"] is not None else "None"
-        opt["mv"] = options["mv"] if options["mv"] is not None else "None"
+        opt = {key: value if value is not None else "None" for key, value in options.items()}
         with h5.File(hdf5_filename, "a") as f:
             if "last iteration" not in f.attrs:
                 f.attrs["last iteration"] = 1
