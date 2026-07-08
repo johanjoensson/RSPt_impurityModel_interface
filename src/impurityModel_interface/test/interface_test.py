@@ -9,6 +9,11 @@ the frequency meshes, the corr -> CF rotation and all solver options.
 
 Point IMPMOD_INTERFACE_TEST_DATA at an archive to run the test; it is skipped
 otherwise. Run under MPI with e.g. `mpirun -n 2 pytest interface_test.py`.
+
+Note: archives written before the switch to RSPt's u4 index convention stored
+"U" with the first two indices swapped (the old `np.moveaxis(u4, 1, 0)`
+workaround) and are not compatible with this test; regenerate the archive
+with a current wrapper run.
 """
 
 import os

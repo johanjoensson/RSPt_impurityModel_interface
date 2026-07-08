@@ -381,8 +381,6 @@ def run_impmod_ed(
     comm.Bcast(corr_to_cf)
     comm.Bcast(h_dft)
     comm.Bcast(u4)
-    # impurityModel uses a weird convention for the U-matrix
-    u4 = np.moveaxis(u4, 1, 0)
 
     # For python, it makes more sense to put the frequency index first, instead of last
     sig_python = np.moveaxis(sig, -1, 0)
