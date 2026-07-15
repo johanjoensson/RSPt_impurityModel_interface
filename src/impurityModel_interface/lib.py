@@ -84,7 +84,7 @@ def parse_solver_line(solver_line):
       Nbath  -- Number of bath states to fit per impurity orbital.
     Options (whitespace separated, case insensitive):
       periodic | partial (pro) | selective | full -- Reorthogonalization mode.
-      star | chain | haver                 -- Bath geometry.
+      star | chain | linked_chain                 -- Bath geometry.
       fit_unocc | fit_occ                  -- Also fit unoccupied bath states / only occupied (default).
       gamma X                              -- Regularization parameter for the bath fit.
       dense_cutoff N                       -- Use dense eigensolver below this matrix size.
@@ -101,7 +101,7 @@ def parse_solver_line(solver_line):
       dn N                                 -- Allowed impurity occupation window (+-dN).
       mv N                                 -- Mixed valence scalar, forwarded per group to
                                               impurityModel's Basis (see impurityModel docs).
-      sparse_green                         -- Use the sparse block-Lanczos Green's function path.
+      dense_green                          -- Use the dense block-Lanczos Green's function path.
     """
     # Remove comments from the solver line
     solver_line = solver_line.split("!")[0]
@@ -117,14 +117,14 @@ def parse_solver_line(solver_line):
         )
     options = {
         "dense_cutoff": 1000,
-        "reort": "partial",
+        "reort": "none",
         "fit_unocc": False,
         "gamma": 0.01,
         "weight_function": "unit",
         "weight": 2,
         "weight_w0": 0.0,
         "spin_flip_dj": False,
-        "bath_geometry": "star",
+        "bath_geometry": "linked_chain",
         "occ_cutoff": 1e-6,
         "dN": None,
         "mv": None,
@@ -132,7 +132,7 @@ def parse_solver_line(solver_line):
         "truncation_threshold": None,
         "slater_min": np.sqrt(np.finfo(float).eps),
         "collapse_chains": False,
-        "sparse_green": False,
+        "sparse_green": True,
     }
     if len(solver_array) > 2:
         skip_next = False
@@ -141,12 +141,12 @@ def parse_solver_line(solver_line):
                 skip_next = False
                 continue
             arg = solver_array[i]
-            if arg.lower() in {"pro", "partial", "selective", "full", "periodic"}:
+            if arg.lower() in {"none", "pro", "partial", "selective", "full", "periodic"}:
                 if arg.lower() == "pro":
                     options["reort"] = "partial"
                 else:
                     options["reort"] = arg.lower()
-            elif arg.lower() in {"star", "chain", "haver"}:
+            elif arg.lower() in {"star", "chain", "linked_chain"}:
                 options["bath_geometry"] = arg.lower()
             elif arg.lower() == "fit_unocc":
                 options["fit_unocc"] = True
@@ -185,8 +185,8 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "mv":
                 options["mv"] = int(solver_array[i + 1])
                 skip_next = True
-            elif arg.lower() == "sparse_green":
-                options["sparse_green"] = True
+            elif arg.lower() == "dense_green":
+                options["sparse_green"] = False
             else:
                 raise RuntimeError(f"Unknown solver parameter {arg}.\n--->Other solver params {solver_array[2:]}")
     if options["bath_geometry"] == "star":
