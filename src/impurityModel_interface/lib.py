@@ -1,19 +1,16 @@
 import sys
 from os import devnull, environ
 
-if "OMP_NUM_THREADS" not in environ or int(environ["OMP_NUM_THREADS"]) != 1:
+if "OMP_NUM_THREADS" not in environ:
     print(
-        "Warning, OMP parallelization can cause the eigensystem solvers to hang indefinitely.",
-        file=sys.stderr,
-    )
-    print(
-        "Therefore OMP_NUM_THREADS will be forcefully set to 1 from now on!.",
+        "OMP_NUM_THREADS will be set to 1 from now on!.",
         file=sys.stderr,
     )
     environ["OMP_NUM_THREADS"] = "1"
 
 import hashlib
 import traceback
+from dataclasses import replace
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 
@@ -57,10 +54,13 @@ try:
     # The stable external surface of the solver; everything under
     # impurityModel.ed.* is internal.
     from impurityModel.api import (
+        BasisOptions,
+        ImpurityModel,
+        Meshes,
+        SolverOptions,
         calc_selfenergy,
         fixed_occupation_dc,
         fixed_peak_dc,
-        matrixToIOp,
         save_Greens_function,
     )
 except ImportError as import_error:
@@ -214,7 +214,50 @@ def parse_solver_line(solver_line):
         f"Truncation threshold      |> {options['truncation_threshold']}\n",
         flush=True,
     )
-    return nominal_occ, nBaths, options
+    # Split the parsed tokens into: the bath-fit parameters (consumed by rspt2spectra and stored
+    # as provenance) and the solver option groups impurityModel consumes. tau is external (a
+    # separate run_impmod_ed argument) and is injected onto BasisOptions by the caller.
+    fit_options = {
+        key: options[key]
+        for key in ("gamma", "weight_function", "weight", "weight_w0", "fit_unocc", "bath_geometry", "collapse_chains")
+    }
+    basis = BasisOptions(
+        nominal_occ={0: nominal_occ},
+        mixed_valence=None if options["mv"] is None else {0: options["mv"]},
+        dN=options["dN"],
+        truncation_threshold=options["truncation_threshold"],
+        chain_restrict=options["chain_restrict"],
+        spin_flip_dj=options["spin_flip_dj"],
+        occ_cutoff=options["occ_cutoff"],
+        slater_weight_min=options["slater_min"],
+    )
+    solver = SolverOptions(
+        reort=options["reort"],
+        dense_cutoff=options["dense_cutoff"],
+        sparse_green=options["sparse_green"],
+    )
+    return nominal_occ, nBaths, fit_options, basis, solver
+
+
+def solver_line_attrs(fit_options, basis, solver):
+    """Flat ``{name: value}`` record of a parsed solver line, for the HDF5 archive attrs.
+
+    Reproduces the historical ``options``-dict attribute dump from the parsed option groups so
+    archived runs read back unchanged (see ``impurityModel.ed.model._read_archive_group``).
+    """
+    return {
+        "reort": solver.reort,
+        "dense_cutoff": solver.dense_cutoff,
+        "sparse_green": solver.sparse_green,
+        "spin_flip_dj": basis.spin_flip_dj,
+        "chain_restrict": basis.chain_restrict,
+        "occ_cutoff": basis.occ_cutoff,
+        "dN": basis.dN,
+        "truncation_threshold": basis.truncation_threshold,
+        "slater_min": basis.slater_weight_min,
+        "mv": None if basis.mixed_valence is None else basis.mixed_valence[0],
+        **fit_options,
+    }
 
 
 def reconstruct_rotations(corr_to_spherical_in, corr_to_cf_in, n_orb, n_rot_cols, n_orb_full):
@@ -406,11 +449,10 @@ def run_impmod_ed(
     else:
         sys.stdout = open(devnull, "w")
 
-    nominal_occ, bath_states_per_orbital, options = parse_solver_line(solver_line)
-    nominal_occ = {0: nominal_occ}
-    mixed_valence = None
-    if options["mv"] is not None:
-        mixed_valence = {0: options["mv"]}
+    _nominal_occ, bath_states_per_orbital, fit_options, basis, solver = parse_solver_line(solver_line)
+    # tau is not part of the solver line; inject the external temperature onto the basis options.
+    basis = replace(basis, tau=tau)
+    nominal_occ = basis.nominal_occ
     if any(n0 > n_orb for n0 in nominal_occ.values()) or any(n0 < 0 for n0 in nominal_occ.values()):
         raise RuntimeError(f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]")
 
@@ -436,7 +478,7 @@ def run_impmod_ed(
 
     hdf5_filename = "impurityModel_data.h5"
     (
-        h_op,
+        H_imp,
         impurity_indices,
         valence_bath_indices,
         conduction_bath_indices,
@@ -451,22 +493,39 @@ def run_impmod_ed(
         w,
         eim,
         tau,
-        gamma=options["gamma"],
-        weight_function=options["weight_function"],
-        weight_w0=options["weight_w0"],
-        exp_weight=options["weight"],
+        gamma=fit_options["gamma"],
+        weight_function=fit_options["weight_function"],
+        weight_w0=fit_options["weight_w0"],
+        exp_weight=fit_options["weight"],
         imag_only=False,
-        valence_bath_only=not options["fit_unocc"],
-        bath_geometry=options["bath_geometry"],
+        valence_bath_only=not fit_options["fit_unocc"],
+        bath_geometry=fit_options["bath_geometry"],
         label=label.strip(),
         hdf5_filename=hdf5_filename,
         verbose=(verbosity >= 1 or rspt_dc_flag == 1),
         extra_verbose=(verbosity >= 2),
         comm=comm,
     )
+    # Build one ImpurityModel from the fitted blocks: it assembles the operator and derives the
+    # impurity/bath orbital layout from the block sizes (no orbital indices passed). The
+    # (valence, conduction) split feeds the double-counting path (calc_selfenergy re-derives its
+    # own from h0). In DC mode the model carries no double counting (get_ed_h0 was called with
+    # sig_dc = 0); the fixed_*_dc search adds it as dc_guess.
+    rot_to_spherical = np.conj(corr_to_cf.T) @ corr_to_spherical
+    model = ImpurityModel.from_blocks(
+        H_imp,
+        v,
+        H_bath,
+        u4=u4,
+        rot_to_spherical=rot_to_spherical,
+        bath_valence_conduction=(valence_bath_indices, conduction_bath_indices),
+    )
     if comm.rank == 0:
         # h5py cannot store None attributes
-        opt = {key: value if value is not None else "None" for key, value in options.items()}
+        opt = {
+            key: value if value is not None else "None"
+            for key, value in solver_line_attrs(fit_options, basis, solver).items()
+        }
         with h5.File(hdf5_filename, "a") as f:
             if "last iteration" not in f.attrs:
                 f.attrs["last iteration"] = 1
@@ -488,11 +547,7 @@ def run_impmod_ed(
                     pass
             h5_write_dataset(cluster_g, "Real frequency mesh", w)
             h5_write_dataset(cluster_g, "Matsubara frequency mesh", iw)
-            h5_write_dataset(
-                cluster_g,
-                "Rot to spherical",
-                np.conj(corr_to_cf.T) @ corr_to_spherical,
-            )
+            h5_write_dataset(cluster_g, "Rot to spherical", rot_to_spherical)
             h5_write_dataset(cluster_g, "Impurity orbitals", impurity_indices)
             h5_write_dataset(cluster_g, "Valence orbitals", valence_bath_indices)
             h5_write_dataset(cluster_g, "Conduction orbitals", conduction_bath_indices)
@@ -550,41 +605,40 @@ def run_impmod_ed(
             dc_mode = "peak"
             dc_target = float(dc_array[0])
 
-        dc_kwargs = dict(
-            N0=nominal_occ,
-            mixed_valence=mixed_valence,
-            impurity_orbitals={0: impurity_indices},
-            bath_states=(
-                {0: valence_bath_indices},
-                {0: conduction_bath_indices},
-            ),
-            u4=u4,
-            dc_guess=sig_dc_cf,
-            spin_flip_dj=options["spin_flip_dj"],
-            tau=tau,
-            rank=rank,
-            verbose=verbosity > 0,
-            dense_cutoff=options["dense_cutoff"],
-            slaterWeightMin=options["slater_min"],
-            truncation_threshold=options["truncation_threshold"],
-        )
         try:
             if dc_mode == "occupation":
                 # Scale the shift search with the real-frequency mesh, so the
                 # steps are sensible in any energy unit (RSPt supplies Ry).
                 bandwidth = w[-1] - w[0]
                 dc_cf = fixed_occupation_dc(
-                    h_op,
+                    model,
+                    basis,
+                    solver,
                     occupation=dc_target,
+                    dc_guess=sig_dc_cf,
+                    comm=comm,
+                    verbosity=verbosity,
                     initial_step=bandwidth / 100,
                     max_shift=bandwidth,
-                    **dc_kwargs,
                 )
             else:
-                dc_cf = fixed_peak_dc(h_op, peak_position=dc_target, **dc_kwargs)
+                dc_cf = fixed_peak_dc(
+                    model,
+                    basis,
+                    solver,
+                    peak_position=dc_target,
+                    dc_guess=sig_dc_cf,
+                    comm=comm,
+                    verbosity=verbosity,
+                )
             # The double counting is calculated in the CF basis, RSPt expects
             # it in the corr basis.
             sig_dc[:, :] = rotate_matrix(dc_cf, np.conj(corr_to_cf.T))
+            er = 0
+        except RuntimeError as e:
+            print("!" * 100)
+            print(f"Exception {e!r} caught on rank {rank}!")
+            print("Returning initial DC unchanged.")
             er = 0
         except Exception as e:
             print("!" * 100)
@@ -600,29 +654,18 @@ def run_impmod_ed(
             comm.Abort(er)
     else:
         try:
+            # The ImpurityModel and the basis/solver option groups were built above (from the
+            # fitted blocks and the parsed solver line); only the frequency meshes are per-call.
+            # No file round-trip: the solver is called directly in memory.
+            meshes = Meshes(iw=1j * iw, w=w, delta=eim)
             results = calc_selfenergy(
-                h0=h_op,
-                u4=u4,
-                iw=1j * iw,
-                w=w,
-                delta=eim,
-                nominal_occ=nominal_occ,
-                mixed_valence=mixed_valence,
-                impurity_orbitals={0: impurity_indices},
-                tau=tau,
-                verbosity=verbosity,
-                rot_to_spherical=np.conj(corr_to_cf.T) @ corr_to_spherical,
-                cluster_label=label.strip(),
+                model,
+                meshes,
+                basis,
+                solver,
                 comm=comm,
-                reort=options["reort"],
-                dense_cutoff=options["dense_cutoff"],
-                spin_flip_dj=options["spin_flip_dj"],
-                chain_restrict=options["chain_restrict"],
-                occ_cutoff=options["occ_cutoff"],
-                truncation_threshold=options["truncation_threshold"],
-                slaterWeightMin=options["slater_min"],
-                dN=options["dN"],
-                sparse_green=options["sparse_green"],
+                verbosity=verbosity,
+                cluster_label=label.strip(),
             )
             if comm.rank == 0:
                 # calc_selfenergy returns everything in its input (CF) basis,
@@ -726,8 +769,11 @@ def get_ed_h0(
     ED solver in RSPt, default: None,
 
     Returns:
-    h0   -- The non-interacting impurity hamiltonian in operator form.
-    eb   -- The bath states used for fitting the hybridization function.
+    A tuple ``(H_imp, impurity_indices, valence_bath_indices, conduction_bath_indices,
+    v_solver, H_bath, H)``: the effective impurity block, the orbital-index classification,
+    the impurity-bath hopping ``v_solver``, the bath block ``H_bath``, and the full assembled
+    solver matrix ``H``. Hand ``(H_imp, v_solver, H_bath)`` to
+    ``ImpurityModel.from_blocks`` to build the model.
     """
 
     # rspt2spectra block-diagonalizes the hybridization function, rotates the
@@ -769,6 +815,7 @@ def get_ed_h0(
         conduction_bath_indices,
         v_solver,
         H_bath,
+        H_imp,
     ) = assemble_h0(
         ebs_star,
         vs_star,
@@ -786,9 +833,10 @@ def get_ed_h0(
         comm=comm,
     )
 
-    h_op = matrixToIOp(H)
+    # Hand back the impurity / hybridization / bath blocks; the caller builds the ImpurityModel
+    # (which assembles the operator and derives the orbital layout) via ImpurityModel.from_blocks.
     return (
-        h_op,
+        H_imp,
         impurity_indices,
         valence_bath_indices,
         conduction_bath_indices,

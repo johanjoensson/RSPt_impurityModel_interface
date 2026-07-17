@@ -18,75 +18,105 @@ from impurityModel_interface.lib import (
     get_weight_function,
     h5_write_dataset,
     parse_solver_line,
+    solver_line_attrs,
 )
 
 
 def test_minimal_line():
-    n0, n_baths, options = parse_solver_line("8 10")
+    n0, n_baths, fit_options, basis, solver = parse_solver_line("8 10")
     assert n0 == 8
     assert n_baths == 10
-    # Star is the default geometry; it disables chain restrictions and sets dN
-    assert options["bath_geometry"] == "star"
-    assert options["chain_restrict"] is False
-    assert options["collapse_chains"] is True
-    assert options["dN"] == 4
-    assert options["weight_function"] == "unit"
+    # linked_chain is the default geometry; it keeps chain restrictions and the
+    # star-only defaults (collapse_chains, dN) do not kick in.
+    assert fit_options["bath_geometry"] == "linked_chain"
+    assert basis.chain_restrict is True
+    assert fit_options["collapse_chains"] is False
+    assert basis.dN is None
+    assert fit_options["weight_function"] == "unit"
+    # The nominal occupation is carried on the basis options.
+    assert basis.nominal_occ == {0: 8}
 
 
 @pytest.mark.parametrize("comment_char", ["!", "#"])
 def test_comments_are_stripped(comment_char):
-    n0, n_baths, options = parse_solver_line(
-        f"8 10 {comment_char} chain gamma 0.5 trailing comment"
-    )
+    n0, n_baths, fit_options, basis, solver = parse_solver_line(f"8 10 {comment_char} chain gamma 0.5 trailing comment")
     assert n0 == 8
     assert n_baths == 10
-    assert options["bath_geometry"] == "star"
-    assert options["gamma"] == 0.01
+    # Everything after the comment char is stripped, so the geometry stays at its default.
+    assert fit_options["bath_geometry"] == "linked_chain"
+    assert fit_options["gamma"] == 0.01
 
 
 def test_full_option_line():
     line = (
-        "8 10 haver full dense_cutoff 500 gamma 0.1 gaussian weight 3 "
+        "8 10 linked_chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 "
         "weight_w0 -1.5 spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 "
-        "slater_min 1e-8 dn 2 mv 1 sparse_green no_chain_restrict fit_unocc"
+        "slater_min 1e-8 dn 2 mv 1 no_chain_restrict fit_unocc"
     )
-    n0, n_baths, options = parse_solver_line(line)
+    n0, n_baths, fit_options, basis, solver = parse_solver_line(line)
     assert n0 == 8
     assert n_baths == 10
-    assert options["bath_geometry"] == "haver"
-    assert options["reort"] == "full"
-    assert options["dense_cutoff"] == 500
-    assert options["gamma"] == pytest.approx(0.1)
-    assert options["weight_function"] == "gaussian"
-    assert options["weight"] == pytest.approx(3)
-    assert options["weight_w0"] == pytest.approx(-1.5)
-    assert options["spin_flip_dj"] is True
-    assert options["occ_cutoff"] == pytest.approx(1e-4)
-    assert options["truncation_threshold"] == int(1e7)
-    assert options["slater_min"] == pytest.approx(1e-8)
-    assert options["dN"] == 2
-    assert options["mv"] == 1
-    assert options["sparse_green"] is True
-    assert options["chain_restrict"] is False
-    assert options["fit_unocc"] is True
+    assert fit_options["bath_geometry"] == "linked_chain"
+    assert solver.reort == "full"
+    assert solver.dense_cutoff == 500
+    assert fit_options["gamma"] == pytest.approx(0.1)
+    assert fit_options["weight_function"] == "gaussian"
+    assert fit_options["weight"] == pytest.approx(3)
+    assert fit_options["weight_w0"] == pytest.approx(-1.5)
+    assert basis.spin_flip_dj is True
+    assert basis.occ_cutoff == pytest.approx(1e-4)
+    assert basis.truncation_threshold == int(1e7)
+    assert basis.slater_weight_min == pytest.approx(1e-8)
+    assert basis.dN == 2
+    assert basis.mixed_valence == {0: 1}
+    # No dense_green token, so the sparse Green's function path is the default
+    assert solver.sparse_green is True
+    assert basis.chain_restrict is False
+    assert fit_options["fit_unocc"] is True
 
 
 def test_pro_maps_to_partial():
-    _, _, options = parse_solver_line("8 10 chain pro")
-    assert options["reort"] == "partial"
+    *_, solver = parse_solver_line("8 10 chain pro")
+    assert solver.reort == "partial"
 
 
 @pytest.mark.parametrize("reort", ["partial", "selective", "full", "periodic"])
 def test_reort_modes(reort):
-    _, _, options = parse_solver_line(f"8 10 chain {reort}")
-    assert options["reort"] == reort
+    *_, solver = parse_solver_line(f"8 10 chain {reort}")
+    assert solver.reort == reort
 
 
 def test_chain_keeps_chain_restrict():
-    _, _, options = parse_solver_line("8 10 chain")
-    assert options["bath_geometry"] == "chain"
-    assert options["chain_restrict"] is True
-    assert options["dN"] is None
+    _, _, fit_options, basis, _solver = parse_solver_line("8 10 chain")
+    assert fit_options["bath_geometry"] == "chain"
+    assert basis.chain_restrict is True
+    assert basis.dN is None
+
+
+def test_solver_line_attrs_reproduces_the_flat_record():
+    # The parsed groups round-trip to the flat attribute record the HDF5 archive stores.
+    _, _, fit_options, basis, solver = parse_solver_line(
+        "8 10 chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 weight_w0 -1.5 "
+        "spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 slater_min 1e-8 dn 2 mv 1 "
+        "dense_green no_chain_restrict fit_unocc"
+    )
+    attrs = solver_line_attrs(fit_options, basis, solver)
+    assert attrs["reort"] == "full"
+    assert attrs["dense_cutoff"] == 500
+    assert attrs["sparse_green"] is False
+    assert attrs["spin_flip_dj"] is True
+    assert attrs["chain_restrict"] is False
+    assert attrs["occ_cutoff"] == pytest.approx(1e-4)
+    assert attrs["dN"] == 2
+    assert attrs["truncation_threshold"] == int(1e7)
+    assert attrs["slater_min"] == pytest.approx(1e-8)
+    assert attrs["mv"] == 1
+    assert attrs["bath_geometry"] == "chain"
+    assert attrs["gamma"] == pytest.approx(0.1)
+    assert attrs["weight_function"] == "gaussian"
+    assert attrs["fit_unocc"] is True
+    # Every option the archive stores is present (the 17 solver-line keys).
+    assert len(attrs) == 17
 
 
 def test_unknown_argument_raises():
