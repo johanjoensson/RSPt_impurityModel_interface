@@ -13,10 +13,8 @@ ffibuilder.set_source(
 """,
 )
 
-ffibuilder.embedding_init_code(
-    r"""
+ffibuilder.embedding_init_code(r"""
     import impurityModel_interface
-"""
-)
+""")
 
 ffibuilder.emit_c_code("run_impurityModel.c")

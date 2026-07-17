@@ -37,8 +37,7 @@ TEST_DATA = os.environ.get(
 requires_data = pytest.mark.skipif(
     not os.path.exists(TEST_DATA),
     reason=(
-        "No test archive found. Set IMPMOD_INTERFACE_TEST_DATA to an "
-        "impurityModel_data.h5 produced by the wrapper."
+        "No test archive found. Set IMPMOD_INTERFACE_TEST_DATA to an " "impurityModel_data.h5 produced by the wrapper."
     ),
 )
 

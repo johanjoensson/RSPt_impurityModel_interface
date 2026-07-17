@@ -114,7 +114,7 @@ def parse_solver_line(solver_line):
     except Exception as e:
         raise RuntimeError(
             f"{e}\n--->N0 {solver_array[0]}\n--->Nbaths {solver_array[1]}\n--->Other params {solver_array[2:]}"
-        )
+        ) from e
     options = {
         "dense_cutoff": 1000,
         "reort": "none",
