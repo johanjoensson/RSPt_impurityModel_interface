@@ -1,5 +1,16 @@
-import sys
-from os import devnull, environ
+import mpi4py
+
+# All imports below run after the mpi4py.rc settings and the OMP_NUM_THREADS
+# block, so E402 is expected and suppressed throughout this preamble. The
+# ordering is deliberate: mpi4py.rc must be set before importing MPI, and
+# OMP_NUM_THREADS must be set before importing the thread-spawning numeric
+# libraries (numpy, h5py).
+mpi4py.rc.initialize = False
+mpi4py.rc.finalize = False
+import sys  # noqa: E402
+from os import devnull, environ  # noqa: E402
+
+from mpi4py import MPI  # noqa: E402
 
 if "OMP_NUM_THREADS" not in environ:
     print(
@@ -8,14 +19,14 @@ if "OMP_NUM_THREADS" not in environ:
     )
     environ["OMP_NUM_THREADS"] = "1"
 
-import hashlib
-import traceback
-from dataclasses import replace
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
+import hashlib  # noqa: E402
+import traceback  # noqa: E402
+from dataclasses import replace  # noqa: E402
+from importlib.metadata import PackageNotFoundError  # noqa: E402
+from importlib.metadata import version as package_version  # noqa: E402
 
-import h5py as h5
-import numpy as np
+import h5py as h5  # noqa: E402
+import numpy as np  # noqa: E402
 
 try:
     from run_impurityModel import ffi
@@ -36,13 +47,9 @@ except ImportError:
             raise RuntimeError("ffi.buffer is only available when embedded in RSPt")
 
     ffi = _FFIStub()
-import mpi4py
-
-mpi4py.rc.initialize = False
-mpi4py.rc.finalize = False
-from mpi4py import MPI  # noqa: E402 - must come after the mpi4py.rc settings above
 from rspt2spectra.h0 import assemble_h0, flatten_star_levels, prepare_hyb_fit  # noqa: E402
 from rspt2spectra.hyb_fit import fit_hyb  # noqa: E402
+from rspt2spectra.plot import plot_hyb_fit  # noqa: E402
 from rspt2spectra.utils import (  # noqa: E402
     rotate_4index_U,
     rotate_Greens_function,
@@ -84,7 +91,7 @@ def parse_solver_line(solver_line):
       Nbath  -- Number of bath states to fit per impurity orbital.
     Options (whitespace separated, case insensitive):
       periodic | partial (pro) | selective | full -- Reorthogonalization mode.
-      star | chain | linked_chain                 -- Bath geometry.
+      star | chain | linked_chain | peeled -- Bath geometry.
       fit_unocc | fit_occ                  -- Also fit unoccupied bath states / only occupied (default).
       gamma X                              -- Regularization parameter for the bath fit.
       dense_cutoff N                       -- Use dense eigensolver below this matrix size.
@@ -107,13 +114,17 @@ def parse_solver_line(solver_line):
     solver_line = solver_line.split("!")[0]
     solver_line = solver_line.split("#")[0]
     solver_array = solver_line.strip().split()
-    assert len(solver_array) >= 2, "The impurityModel ED solver requires at least 2 arguments; N0 nBaths"
+    assert (
+        len(solver_array) >= 3
+    ), "The impurityModel ED solver requires at least 3 arguments; N0 nBaths excitation_budget"
     try:
         nominal_occ = int(solver_array[0])
         nBaths = int(solver_array[1])
+        excitation_budget = int(solver_array[2])
     except Exception as e:
         raise RuntimeError(
-            f"{e}\n--->N0 {solver_array[0]}\n--->Nbaths {solver_array[1]}\n--->Other params {solver_array[2:]}"
+            f"{e}\n--->N0 {solver_array[0]}\n--->Nbaths {solver_array[1]}\n"
+            f"--->excitation_budget {solver_array[2]}\n--->Other params {solver_array[3:]}"
         ) from e
     options = {
         "dense_cutoff": 1000,
@@ -124,8 +135,9 @@ def parse_solver_line(solver_line):
         "weight": 2,
         "weight_w0": 0.0,
         "spin_flip_dj": False,
-        "bath_geometry": "linked_chain",
+        "bath_geometry": "peeled",
         "occ_cutoff": 1e-6,
+        "excitation_budget": 4,
         "dN": None,
         "mv": None,
         "chain_restrict": True,
@@ -134,9 +146,9 @@ def parse_solver_line(solver_line):
         "collapse_chains": False,
         "sparse_green": True,
     }
-    if len(solver_array) > 2:
+    if len(solver_array) > 3:
         skip_next = False
-        for i in range(2, len(solver_array)):
+        for i in range(3, len(solver_array)):
             if skip_next:
                 skip_next = False
                 continue
@@ -146,8 +158,11 @@ def parse_solver_line(solver_line):
                     options["reort"] = "partial"
                 else:
                     options["reort"] = arg.lower()
-            elif arg.lower() in {"star", "chain", "linked_chain"}:
-                options["bath_geometry"] = arg.lower()
+            elif arg.lower() in {"star", "chain", "linked_chain", "peeled", "peeled_linked_chain"}:
+                if arg.lower() == "peeled":
+                    options["bath_geometry"] = "peeled_linked_chain"
+                else:
+                    options["bath_geometry"] = arg.lower()
             elif arg.lower() == "fit_unocc":
                 options["fit_unocc"] = True
             elif arg.lower() == "fit_occ":
@@ -230,6 +245,7 @@ def parse_solver_line(solver_line):
         spin_flip_dj=options["spin_flip_dj"],
         occ_cutoff=options["occ_cutoff"],
         slater_weight_min=options["slater_min"],
+        excitation_budget=excitation_budget,
     )
     solver = SolverOptions(
         reort=options["reort"],
@@ -436,18 +452,21 @@ def run_impmod_ed(
     u4 = rotate_4index_U(u4, corr_to_cf)
 
     stdout_save = sys.stdout
+    # sys.stdout is redirected to a file that must stay open for the remainder
+    # of the call (restored from stdout_save at the end), so a context manager
+    # is intentionally not used here.
     if rank == 0:
-        sys.stdout = open(
+        sys.stdout = open(  # noqa: SIM115
             f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}.out",
             "w",
         )
     elif verbosity > 0:
-        sys.stdout = open(
+        sys.stdout = open(  # noqa: SIM115
             f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}-{rank}.out",
             "w",
         )
     else:
-        sys.stdout = open(devnull, "w")
+        sys.stdout = open(devnull, "w")  # noqa: SIM115
 
     _nominal_occ, bath_states_per_orbital, fit_options, basis, solver = parse_solver_line(solver_line)
     # tau is not part of the solver line; inject the external temperature onto the basis options.
@@ -458,7 +477,8 @@ def run_impmod_ed(
 
     if abs(w[1] - w[0]) > eim / 2 and rank == 0:
         print(
-            "WARNING: Your real frequency mesh is rather coarse. Recommended dE <= eim/5, in order to guarantee resolution of fine structures in the self energy."
+            "WARNING: Your real frequency mesh is rather coarse. Recommended dE <= eim/5, "
+            "in order to guarantee resolution of fine structures in the self energy."
         )
     # The solver works in the CF basis; RSPt sends and expects quantities in
     # the corr basis. Log how different the two bases are, so basis mixups are
@@ -738,7 +758,7 @@ def get_ed_h0(
     weight_w0=0,
     imag_only=False,
     valence_bath_only=True,
-    bath_geometry="star",
+    bath_geometry="peeled_linked_chain",
     label=None,
     hdf5_filename="impurityModel_data.h5",
     verbose=True,
@@ -765,8 +785,8 @@ def get_ed_h0(
     imag_only     -- Currently ignored; rspt2spectra's fit_hyb does not support
                      fitting only the imaginary part. Kept for API stability.
     valence_bath_only -- Only fit bath stated in the valence band, default: True.
-    label          -- Label for the cluster, used for saving a copy of the Hamiltonian that can be plugged into the Matsubara
-    ED solver in RSPt, default: None,
+    label          -- Label for the cluster, used for saving a copy of the Hamiltonian
+                      that can be plugged into the Matsubara ED solver in RSPt, default: None,
 
     Returns:
     A tuple ``(H_imp, impurity_indices, valence_bath_indices, conduction_bath_indices,
@@ -776,6 +796,7 @@ def get_ed_h0(
     ``ImpurityModel.from_blocks`` to build the model.
     """
 
+    rank = 0 if comm is None else comm.rank
     # rspt2spectra block-diagonalizes the hybridization function, rotates the
     # local hamiltonian into the same (fitting) basis and builds the block
     # partition from the union of both connectivities.
@@ -832,6 +853,22 @@ def get_ed_h0(
         extra_verbose=extra_verbose,
         comm=comm,
     )
+
+    if extra_verbose and rank == 0:
+        figs = plot_hyb_fit(
+            w,
+            eim,
+            phase_hyb,
+            ebs_star,
+            vs_star,
+            shifts,
+            H_local_Q,
+            block_structure,
+            bath_geometry,
+            # peel_weight=peel_weight,
+        )
+        for block_idx, fig in enumerate(figs):
+            fig.savefig(f"bath_state_resolved_hybridization_fit_block_{block_idx}.png")
 
     # Hand back the impurity / hybridization / bath blocks; the caller builds the ImpurityModel
     # (which assembles the operator and derives the orbital layout) via ImpurityModel.from_blocks.
@@ -933,7 +970,8 @@ def fit_hyb_star(
         print("Star bath energies and hopping parameters:")
         for bi, (eb, vb) in enumerate(zip(ebs_star, vs_star)):
             print(
-                f"Energy   :  Hopping  (impurity orbitals {block_structure.blocks[block_structure.inequivalent_blocks[bi]]})"
+                f"Energy   :  Hopping  (impurity orbitals "
+                f"{block_structure.blocks[block_structure.inequivalent_blocks[bi]]})"
             )
             for eb_i, vb_i in zip(eb, vb):
                 print(

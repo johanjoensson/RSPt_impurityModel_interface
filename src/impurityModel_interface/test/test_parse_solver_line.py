@@ -23,12 +23,13 @@ from impurityModel_interface.lib import (
 
 
 def test_minimal_line():
-    n0, n_baths, fit_options, basis, solver = parse_solver_line("8 10")
+    n0, n_baths, fit_options, basis, _solver = parse_solver_line("8 10 2")
     assert n0 == 8
     assert n_baths == 10
-    # linked_chain is the default geometry; it keeps chain restrictions and the
+    assert basis.excitation_budget == 2
+    # peeled_linked_chain is the default geometry; it keeps chain restrictions and the
     # star-only defaults (collapse_chains, dN) do not kick in.
-    assert fit_options["bath_geometry"] == "linked_chain"
+    assert fit_options["bath_geometry"] == "peeled"
     assert basis.chain_restrict is True
     assert fit_options["collapse_chains"] is False
     assert basis.dN is None
@@ -39,23 +40,27 @@ def test_minimal_line():
 
 @pytest.mark.parametrize("comment_char", ["!", "#"])
 def test_comments_are_stripped(comment_char):
-    n0, n_baths, fit_options, basis, solver = parse_solver_line(f"8 10 {comment_char} chain gamma 0.5 trailing comment")
+    n0, n_baths, fit_options, basis, _solver = parse_solver_line(
+        f"8 10 4 {comment_char} chain gamma 0.5 trailing comment"
+    )
     assert n0 == 8
     assert n_baths == 10
+    assert basis.excitation_budget == 4
     # Everything after the comment char is stripped, so the geometry stays at its default.
-    assert fit_options["bath_geometry"] == "linked_chain"
+    assert fit_options["bath_geometry"] == "peeled"
     assert fit_options["gamma"] == 0.01
 
 
 def test_full_option_line():
     line = (
-        "8 10 linked_chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 "
+        "8 10 4 linked_chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 "
         "weight_w0 -1.5 spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 "
         "slater_min 1e-8 dn 2 mv 1 no_chain_restrict fit_unocc"
     )
     n0, n_baths, fit_options, basis, solver = parse_solver_line(line)
     assert n0 == 8
     assert n_baths == 10
+    assert basis.excitation_budget == 4
     assert fit_options["bath_geometry"] == "linked_chain"
     assert solver.reort == "full"
     assert solver.dense_cutoff == 500
@@ -76,18 +81,18 @@ def test_full_option_line():
 
 
 def test_pro_maps_to_partial():
-    *_, solver = parse_solver_line("8 10 chain pro")
+    *_, solver = parse_solver_line("8 10 4 chain pro")
     assert solver.reort == "partial"
 
 
 @pytest.mark.parametrize("reort", ["partial", "selective", "full", "periodic"])
 def test_reort_modes(reort):
-    *_, solver = parse_solver_line(f"8 10 chain {reort}")
+    *_, solver = parse_solver_line(f"8 10 4 chain {reort}")
     assert solver.reort == reort
 
 
 def test_chain_keeps_chain_restrict():
-    _, _, fit_options, basis, _solver = parse_solver_line("8 10 chain")
+    _, _, fit_options, basis, _solver = parse_solver_line("8 10 4 chain")
     assert fit_options["bath_geometry"] == "chain"
     assert basis.chain_restrict is True
     assert basis.dN is None
@@ -96,7 +101,7 @@ def test_chain_keeps_chain_restrict():
 def test_solver_line_attrs_reproduces_the_flat_record():
     # The parsed groups round-trip to the flat attribute record the HDF5 archive stores.
     _, _, fit_options, basis, solver = parse_solver_line(
-        "8 10 chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 weight_w0 -1.5 "
+        "8 10 4 chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 weight_w0 -1.5 "
         "spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 slater_min 1e-8 dn 2 mv 1 "
         "dense_green no_chain_restrict fit_unocc"
     )
@@ -121,17 +126,22 @@ def test_solver_line_attrs_reproduces_the_flat_record():
 
 def test_unknown_argument_raises():
     with pytest.raises(RuntimeError, match="Unknown solver parameter"):
-        parse_solver_line("8 10 bogus_option")
+        parse_solver_line("8 10 4 bogus_option")
 
 
-def test_too_few_arguments_raises():
+def test_single_argument_raises():
     with pytest.raises(AssertionError):
         parse_solver_line("8")
 
 
+def test_two_arguments_raises():
+    with pytest.raises(AssertionError):
+        parse_solver_line("8 10")
+
+
 def test_non_integer_arguments_raise():
     with pytest.raises(RuntimeError):
-        parse_solver_line("eight 10")
+        parse_solver_line("eight 10 4")
 
 
 def test_weight_function_unit():
