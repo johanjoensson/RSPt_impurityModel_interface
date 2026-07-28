@@ -58,6 +58,21 @@ endif()
 add_custom_target(PYTHON_MODULE COMMAND ${IMPURITYMODEL_ENV} CC=${CMAKE_C_COMPILER} CFLAGS=${CMAKE_C_FLAGS} CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=${CMAKE_CXX_FLAGS} ${Python3_EXECUTABLE} -m pip install ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
 
 Python3_add_library(${PROJECT_NAME} SHARED run_impurityModel.c)
+
+# Ensure that the directory containing the Python library is added to the RPATH
+# so that consumers of the shared library don't need to manually configure library paths.
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH_USE_LINK_PATH TRUE
+)
+
+# Explicitly append the Python library directories to RPATH to ensure they are
+# included even if they are located in system-default directories.
+if(Python3_RUNTIME_LIBRARY_DIRS)
+    set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY INSTALL_RPATH "${Python3_RUNTIME_LIBRARY_DIRS}")
+elseif(Python3_LIBRARY_DIRS)
+    set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY INSTALL_RPATH "${Python3_LIBRARY_DIRS}")
+endif()
 # target_include_directories(${PROJECT_NAME} PRIVATE  ${PROJECT_SOURCE_DIR}/src)
 add_dependencies(${PROJECT_NAME} PYTHON_MODULE)
 

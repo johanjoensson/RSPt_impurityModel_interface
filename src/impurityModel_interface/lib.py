@@ -507,7 +507,6 @@ def run_impmod_ed(
         H_solver,
     ) = get_ed_h0(
         h_dft,
-        0 if rspt_dc_flag == 1 else sig_dc_cf,
         hyb,
         bath_states_per_orbital,
         w,
@@ -529,14 +528,17 @@ def run_impmod_ed(
     # Build one ImpurityModel from the fitted blocks: it assembles the operator and derives the
     # impurity/bath orbital layout from the block sizes (no orbital indices passed). The
     # (valence, conduction) split feeds the double-counting path (calc_selfenergy re-derives its
-    # own from h0). In DC mode the model carries no double counting (get_ed_h0 was called with
-    # sig_dc = 0); the fixed_*_dc search adds it as dc_guess.
+    # own from h0). model.h0 is the raw h_dft + bath (RSPt passes h_dft WITHOUT the double
+    # counting subtracted) and model.dc is RSPt's current dc: calc_selfenergy subtracts it
+    # (h0 - dc + U) and the fixed_*_dc searches use it as dc_guess -- their DFT reference
+    # occupation is the Fermi filling of the raw h0, independent of model.dc.
     rot_to_spherical = np.conj(corr_to_cf.T) @ corr_to_spherical
     model = ImpurityModel.from_blocks(
         H_imp,
         v,
         H_bath,
         u4=u4,
+        dc=sig_dc_cf,
         rot_to_spherical=rot_to_spherical,
         bath_valence_conduction=(valence_bath_indices, conduction_bath_indices),
     )
@@ -575,6 +577,7 @@ def run_impmod_ed(
             h5_write_dataset(cluster_g, "H DFT", h_dft)
             h5_write_dataset(cluster_g, "H bath", H_bath)
             h5_write_dataset(cluster_g, "V", v)
+            h5_write_dataset(cluster_g, "DC", sig_dc_cf)
             h5_write_dataset(cluster_g, "U", u4)
             # The full one-particle solver hamiltonian (impurity + bath, CF
             # basis) and the corr -> CF rotation; together they make the
@@ -611,16 +614,18 @@ def run_impmod_ed(
         #                             negative)
         #   occ <occupation>       -- fix the thermal impurity occupation
         if len(dc_array) > 0 and dc_array[0].lower() in {"occ", "occupation"}:
-            assert len(dc_array) == 2, (
-                "impurityModel occupation double counting takes exactly 1 "
+            assert len(dc_array) <= 2, (
+                "impurityModel occupation double counting takes at most 1 "
                 f"argument, the target impurity occupation. Got: {dc_array}"
             )
             dc_mode = "occupation"
-            dc_target = float(dc_array[1])
+            dc_target = None
+            if len(dc_array) == 2:
+                dc_target = float(dc_array[1])
         else:
             assert len(dc_array) == 1, (
                 "impurityModel double counting takes 1 argument, peak_position, "
-                f"or 'occ <target impurity occupation>'. Got: {dc_array}"
+                f"or 'occ [target impurity occupation]'. Got: {dc_array}"
             )
             dc_mode = "peak"
             dc_target = float(dc_array[0])
@@ -635,7 +640,6 @@ def run_impmod_ed(
                     basis,
                     solver,
                     occupation=dc_target,
-                    dc_guess=sig_dc_cf,
                     comm=comm,
                     verbosity=verbosity,
                     initial_step=bandwidth / 100,
@@ -647,7 +651,6 @@ def run_impmod_ed(
                     basis,
                     solver,
                     peak_position=dc_target,
-                    dc_guess=sig_dc_cf,
                     comm=comm,
                     verbosity=verbosity,
                 )
@@ -746,7 +749,6 @@ def run_impmod_ed(
 
 def get_ed_h0(
     H_dft,
-    sig_dc,
     hyb,
     bath_states_per_orbital,
     w,
@@ -800,7 +802,7 @@ def get_ed_h0(
     # rspt2spectra block-diagonalizes the hybridization function, rotates the
     # local hamiltonian into the same (fitting) basis and builds the block
     # partition from the union of both connectivities.
-    Q, phase_hyb, H_local_Q, block_structure = prepare_hyb_fit(hyb, H_dft + sig_dc, tol=1e-6, verbose=verbose)
+    Q, phase_hyb, H_local_Q, block_structure = prepare_hyb_fit(hyb, H_dft, tol=1e-6, verbose=verbose)
 
     # Fingerprint of the hybridization function, used to decide whether a
     # stored bath fit can be reused (identical hybridization) or the fit has
