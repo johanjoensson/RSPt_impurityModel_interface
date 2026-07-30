@@ -66,12 +66,16 @@ try:
         ImpurityModel,
         Meshes,
         SolverOptions,
+        amf_dc,
         calc_selfenergy,
         discretized_impurity_occupation,
         fixed_occupation_dc,
         fixed_peak_dc,
+        fll_dc,
+        nominal_dc,
         report_continuum_reference,
         save_Greens_function,
+        sigma_inf_dc,
     )
 except ImportError as import_error:
     raise ImportError(
@@ -632,12 +636,21 @@ def run_impmod_ed(
                 del dc_array[_i : _i + 2]
                 break
 
-        # Two double counting criteria:
+        # Double counting criteria:
         #   <peak_position>        -- place a spectral peak at the given energy
         #                             (E[N+1]-E[N] if positive, E[N]-E[N-1] if
         #                             negative)
         #   occ <occupation>       -- fix the thermal impurity occupation
-        # Either may be followed by 'alpha <value>' (parsed and removed above).
+        #   fll | amf | sigma_inf  -- static schemes (dc_static.py), evaluated at the DFT
+        #                             reference occupation/density matrix (no ED solve)
+        #   nominal                -- FLL at the NOMINAL (integer) occupation, not the DFT
+        #                             reference (M4): needs no reference filling, so it cannot
+        #                             saturate and cannot inherit the fit-resolution sensitivity
+        #                             B1 measures for the other schemes. The natural dc_guess for
+        #                             CSC iteration 1, or a reference to check a converged
+        #                             fixed_occupation_dc answer against.
+        # Any may be followed by 'alpha <value>' (parsed and removed above).
+        _STATIC_SCHEMES = {"fll", "amf", "sigma_inf", "sigmainf", "nominal"}
         if len(dc_array) > 0 and dc_array[0].lower() in {"occ", "occupation"}:
             assert len(dc_array) <= 2, (
                 "impurityModel occupation double counting takes at most 1 "
@@ -647,10 +660,18 @@ def run_impmod_ed(
             dc_target = None
             if len(dc_array) == 2:
                 dc_target = float(dc_array[1])
+        elif len(dc_array) > 0 and dc_array[0].lower() in _STATIC_SCHEMES:
+            assert len(dc_array) == 1, (
+                "impurityModel static double counting (fll, amf, sigma_inf, nominal) takes no "
+                f"further arguments (besides 'alpha <value>', already parsed). Got: {dc_array}"
+            )
+            dc_mode = dc_array[0].lower()
+            dc_target = None
         else:
             assert len(dc_array) == 1, (
                 "impurityModel double counting takes 1 argument, peak_position, "
-                f"or 'occ [target impurity occupation]'. Got: {dc_array}"
+                "'occ [target impurity occupation]', or one of fll/amf/sigma_inf/nominal. "
+                f"Got: {dc_array}"
             )
             dc_mode = "peak"
             dc_target = float(dc_array[0])
@@ -670,7 +691,7 @@ def run_impmod_ed(
                     initial_step=bandwidth / 100,
                     max_shift=bandwidth,
                 )
-            else:
+            elif dc_mode == "peak":
                 dc_cf = fixed_peak_dc(
                     model,
                     basis,
@@ -679,6 +700,15 @@ def run_impmod_ed(
                     comm=comm,
                     verbosity=verbosity,
                 )
+            elif dc_mode == "fll":
+                dc_cf = fll_dc(model, tau=tau)
+            elif dc_mode == "amf":
+                dc_cf = amf_dc(model, tau=tau)
+            elif dc_mode in ("sigma_inf", "sigmainf"):
+                dc_cf = sigma_inf_dc(model, tau=tau)
+            else:
+                assert dc_mode == "nominal"
+                dc_cf = nominal_dc(model, sum(nominal_occ.values()))
             # B4: damp the search's full-shift answer against the guess it started from --
             # dc_guess + alpha*mu -- rather than persisting a bare mu, which is meaningless
             # without knowing which dc_guess it was relative to (dc_search's own module
