@@ -62,12 +62,15 @@ try:
     # impurityModel.ed.* is internal.
     from impurityModel.api import (
         BasisOptions,
+        DoubleCountingUnreachable,
         ImpurityModel,
         Meshes,
         SolverOptions,
         calc_selfenergy,
+        discretized_impurity_occupation,
         fixed_occupation_dc,
         fixed_peak_dc,
+        report_continuum_reference,
         save_Greens_function,
     )
 except ImportError as import_error:
@@ -602,6 +605,11 @@ def run_impmod_ed(
             "hyb-fit",
             label.strip(),
         )
+        # B1: is the occupation fixed_occupation_dc pins to the true DFT impurity occupation, or
+        # an artefact of how finely the bath was discretized? Diagnostic only -- it does not
+        # change the criterion's target; see dc_reference.report_continuum_reference's docstring.
+        n0_disc = discretized_impurity_occupation(model, tau)
+        report_continuum_reference(h_dft, hyb, hyb_fit, w, eim, tau, n0_disc, rank=rank)
 
     if rspt_dc_flag == 1:
         dc_line = ffi.string(rspt_dc_line, 100).decode("ascii")
@@ -658,10 +666,24 @@ def run_impmod_ed(
             # it in the corr basis.
             sig_dc[:, :] = rotate_matrix(dc_cf, np.conj(corr_to_cf.T))
             er = 0
-        except RuntimeError as e:
+        except DoubleCountingUnreachable as e:
+            # A modelling verdict, not a solver failure (dc_search.DoubleCountingUnreachable's
+            # docstring): the target has no solution with this bath/truncation. sig_dc was never
+            # written above, so it already holds RSPt's incoming DC unchanged -- distinguish that
+            # from success (er=0 with a silent, indistinguishable "nothing happened") with an
+            # unmistakable banner and a record in the archive, so a CSC run can be audited
+            # afterward for which iterations actually determined a DC.
             print("!" * 100)
             print(f"Exception {e!r} caught on rank {rank}!")
-            print("Returning initial DC unchanged.")
+            print("DOUBLE COUNTING SEARCH COULD NOT REACH ITS TARGET. Returning initial DC unchanged.")
+            print("!" * 100, flush=True)
+            if comm.rank == 0:
+                with h5.File(hdf5_filename, "a") as f:
+                    it = f.attrs.get("last iteration", 1)
+                    group_name = f"{label.strip()} {it}"
+                    if group_name not in f:
+                        f.create_group(group_name)
+                    f[group_name].attrs["DC search unreachable"] = str(e)
             er = 0
         except Exception as e:
             print("!" * 100)
