@@ -968,6 +968,15 @@ def fit_hyb_star(
     ebs_star = None
     shifts = None
     read_hopping = False
+    # M2: RSPt calls run_impmod_ed twice per CSC iteration (rspt_dc_flag=1 to determine the DC,
+    # then 0 to solve); each call re-runs this fit. If the DC search and the selfenergy solve did
+    # not end up using the SAME bath fit, the DC was determined on a different model than the one
+    # it is applied to -- precisely the parity failure this branch's caching exists to prevent.
+    # stored_fingerprint (found but not necessarily matching) distinguishes a genuine mismatch
+    # (two calls this iteration disagree on hyb) from the ordinary first-computation case (no
+    # stored fit yet), which the printed message below reports either way, not gated on verbose.
+    stored_fingerprint = None
+    it = None
     if comm is None or comm.rank == 0:
         # Reuse the stored bath fit if, and only if, it was produced from this
         # exact hybridization function and block structure. This lets the
@@ -981,7 +990,8 @@ def fit_hyb_star(
             ) as ar:
                 it = ar.attrs["last iteration"]
                 fit_g = ar[f"{label} {it}/Bath fit"]
-                if fit_g.attrs.get("hyb fingerprint", "") == hyb_fingerprint and fit_g.attrs.get(
+                stored_fingerprint = fit_g.attrs.get("hyb fingerprint", None)
+                if stored_fingerprint == hyb_fingerprint and fit_g.attrs.get(
                     "block structure", ""
                 ) == repr(block_structure):
                     print("Reading stored bath energies and hopping parameters")
@@ -997,13 +1007,36 @@ def fit_hyb_star(
             vs_star = None
             ebs_star = None
             shifts = None
+        # it may still be None here (no archive file yet, or "last iteration" not written yet --
+        # the very first call this process ever makes): report that plainly rather than crashing
+        # on an undefined iteration number.
+        iteration_label = "iteration ?" if it is None else f"iteration {it}"
+        if read_hopping:
+            print(
+                f"Bath fit REUSED for {label!r} {iteration_label} (hybridization fingerprint "
+                "matches): the DC search and the selfenergy solve share the identical bath "
+                "model.",
+                flush=True,
+            )
+        elif stored_fingerprint is not None:
+            print(
+                f"WARNING: a bath fit is already stored for {label!r} {iteration_label}, but "
+                "its hybridization fingerprint differs from this call's -- the DC search and "
+                "the selfenergy solve are NOT using the same bath model this iteration. "
+                "Refitting.",
+                flush=True,
+            )
+        else:
+            print(
+                f"Bath fit computed fresh for {label!r} {iteration_label} (no fit stored yet "
+                "this iteration).",
+                flush=True,
+            )
     if comm is not None:
         ebs_star = comm.bcast(ebs_star, root=0)
         vs_star = comm.bcast(vs_star, root=0)
         shifts = comm.bcast(shifts, root=0)
-    if ebs_star is not None and verbose:
-        print("Read bath energies and hopping parameters", flush=True)
-    elif ebs_star is None:
+    if ebs_star is None:
         trace_phase_hyb = np.sum(np.diagonal(phase_hyb, axis1=1, axis2=2), axis=1)
         w_min = w[np.argmax(np.abs(trace_phase_hyb) > 1e-6)]
         w_max = w[-(np.argmax(np.abs(trace_phase_hyb)[::-1] > 1e-6) + 1)]
