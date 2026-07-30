@@ -616,11 +616,28 @@ def run_impmod_ed(
         dc_line = dc_line.split("!")[0]
         dc_line = dc_line.split("#")[0]
         dc_array = dc_line.strip().split()
+
+        # Optional damping, 'alpha X' anywhere on the line (B4): RSPt applies the returned DC
+        # verbatim, with no mixing of its own against the previous iteration's value -- an
+        # undamped full Newton step on a problem whose target (the charge density) moves
+        # underneath it each CSC iteration, combined with a search that can return a point right
+        # at a charge-sector boundary (dc_search._refine_bracket), is a d8/d9 limit-cycle
+        # generator. Damp on our side: DC_new = dc_guess + alpha * mu. Parsed and stripped before
+        # the mode-specific parsing below, so it can follow either a peak position or 'occ [N]'.
+        dc_alpha = 0.5
+        for _i, _token in enumerate(dc_array):
+            if _token.lower() == "alpha":
+                assert _i + 1 < len(dc_array), "'alpha' on the double-counting line needs a value"
+                dc_alpha = float(dc_array[_i + 1])
+                del dc_array[_i : _i + 2]
+                break
+
         # Two double counting criteria:
         #   <peak_position>        -- place a spectral peak at the given energy
         #                             (E[N+1]-E[N] if positive, E[N]-E[N-1] if
         #                             negative)
         #   occ <occupation>       -- fix the thermal impurity occupation
+        # Either may be followed by 'alpha <value>' (parsed and removed above).
         if len(dc_array) > 0 and dc_array[0].lower() in {"occ", "occupation"}:
             assert len(dc_array) <= 2, (
                 "impurityModel occupation double counting takes at most 1 "
@@ -662,9 +679,32 @@ def run_impmod_ed(
                     comm=comm,
                     verbosity=verbosity,
                 )
+            # B4: damp the search's full-shift answer against the guess it started from --
+            # dc_guess + alpha*mu -- rather than persisting a bare mu, which is meaningless
+            # without knowing which dc_guess it was relative to (dc_search's own module
+            # docstring; this cost the campaign three rounds of confusion before it was fixed in
+            # reporting, and would cost RSPt a limit cycle if repeated here). sig_dc_cf is this
+            # call's dc_guess, already in the CF basis dc_cf shares.
+            damped_dc_cf = sig_dc_cf + dc_alpha * (dc_cf - sig_dc_cf)
+            if comm.rank == 0:
+                # Persist the full damped DC matrix (never the bare mu) and fingerprint it
+                # against the dc_guess it was computed from, so the archive can be audited for
+                # whether the next iteration's incoming DC is actually a continuation of this
+                # one's answer or something else changed it underneath.
+                with h5.File(hdf5_filename, "a") as f:
+                    it = f.attrs.get("last iteration", 1)
+                    group_name = f"{label.strip()} {it}"
+                    if group_name not in f:
+                        f.create_group(group_name)
+                    cluster_g = f[group_name]
+                    cluster_g.attrs["DC damping alpha"] = dc_alpha
+                    cluster_g.attrs["DC guess fingerprint"] = hashlib.sha256(
+                        np.ascontiguousarray(sig_dc_cf).tobytes()
+                    ).hexdigest()
+                    h5_write_dataset(cluster_g, "DC damped", damped_dc_cf)
             # The double counting is calculated in the CF basis, RSPt expects
             # it in the corr basis.
-            sig_dc[:, :] = rotate_matrix(dc_cf, np.conj(corr_to_cf.T))
+            sig_dc[:, :] = rotate_matrix(damped_dc_cf, np.conj(corr_to_cf.T))
             er = 0
         except DoubleCountingUnreachable as e:
             # A modelling verdict, not a solver failure (dc_search.DoubleCountingUnreachable's
