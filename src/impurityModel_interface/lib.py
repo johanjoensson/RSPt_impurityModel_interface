@@ -47,7 +47,11 @@ except ImportError:
             raise RuntimeError("ffi.buffer is only available when embedded in RSPt")
 
     ffi = _FFIStub()
-from rspt2spectra.h0 import assemble_h0, flatten_star_levels, prepare_hyb_fit  # noqa: E402
+from rspt2spectra.h0 import (
+    assemble_h0,
+    flatten_star_levels,
+    prepare_hyb_fit,
+)  # noqa: E402
 from rspt2spectra.hyb_fit import fit_hyb  # noqa: E402
 from rspt2spectra.plot import plot_hyb_fit  # noqa: E402
 from rspt2spectra.utils import (  # noqa: E402
@@ -68,7 +72,11 @@ try:
         SolverOptions,
         amf_dc,
         calc_selfenergy,
+        dc_levels,
+        dc_spread,
         discretized_impurity_occupation,
+        emit_dc_record,
+        fixed_gap_dc,
         fixed_occupation_dc,
         fixed_peak_dc,
         fll_dc,
@@ -160,12 +168,25 @@ def parse_solver_line(solver_line):
                 skip_next = False
                 continue
             arg = solver_array[i]
-            if arg.lower() in {"none", "pro", "partial", "selective", "full", "periodic"}:
+            if arg.lower() in {
+                "none",
+                "pro",
+                "partial",
+                "selective",
+                "full",
+                "periodic",
+            }:
                 if arg.lower() == "pro":
                     options["reort"] = "partial"
                 else:
                     options["reort"] = arg.lower()
-            elif arg.lower() in {"star", "chain", "linked_chain", "peeled", "peeled_linked_chain"}:
+            elif arg.lower() in {
+                "star",
+                "chain",
+                "linked_chain",
+                "peeled",
+                "peeled_linked_chain",
+            }:
                 if arg.lower() == "peeled":
                     options["bath_geometry"] = "peeled_linked_chain"
                 else:
@@ -241,7 +262,15 @@ def parse_solver_line(solver_line):
     # separate run_impmod_ed argument) and is injected onto BasisOptions by the caller.
     fit_options = {
         key: options[key]
-        for key in ("gamma", "weight_function", "weight", "weight_w0", "fit_unocc", "bath_geometry", "collapse_chains")
+        for key in (
+            "gamma",
+            "weight_function",
+            "weight",
+            "weight_w0",
+            "fit_unocc",
+            "bath_geometry",
+            "collapse_chains",
+        )
     }
     basis = BasisOptions(
         nominal_occ={0: nominal_occ},
@@ -345,7 +374,188 @@ def h5_write_dataset(group, name, data):
     group.create_dataset(name, data=data)
 
 
+def _previous_damped_dc(hdf5_filename, label, comm):
+    """The double counting this interface returned on the most recent earlier iteration.
+
+    This -- not the ``sig_dc`` RSPt hands in -- is the anchor the damping has to pull toward.
+    RSPt rebuilds ``sig_dc`` from its own FLL/AMF potential on every ``double_counting`` call
+    and never stores our answer, so the incoming value carries no memory of what the criterion
+    converged to last time.
+
+    Searches the archive backwards from the current iteration for the newest group holding a
+    ``"DC damped"`` dataset, so an iteration that skipped or failed the DC search does not
+    break the chain. Returns ``None`` when there is no earlier answer (the first iteration),
+    which the caller reads as "return the converged value undamped".
+
+    Read on rank 0 and broadcast: every rank writes ``sig_dc`` from the result, so a rank-local
+    value would return a different double counting per rank.
+    """
+    previous = None
+    if comm is None or comm.rank == 0:
+        try:
+            with h5.File(hdf5_filename, "r") as f:
+                current = int(f.attrs.get("last iteration", 1))
+                for it in range(current - 1, 0, -1):
+                    group_name = f"{label.strip()} {it}"
+                    if group_name in f and "DC damped" in f[group_name]:
+                        previous = np.asarray(f[group_name]["DC damped"])
+                        break
+        except (OSError, KeyError):
+            # No archive yet (first call of a fresh run), or an unreadable one: no anchor.
+            previous = None
+    if comm is not None:
+        previous = comm.bcast(previous, root=0)
+    return previous
+
+
+def _double_counting_sector(hdf5_filename, label, comm):
+    """The charge sector the double-counting search settled on, for the current iteration.
+
+    Written by the ``rspt_dc_flag=1`` call and read back by the ``rspt_dc_flag=0`` one, which
+    RSPt makes in the same process a moment later. ``None`` when this iteration ran no DC search
+    (a static scheme, an unreachable target, or a plain self-energy run).
+
+    Read on rank 0 and broadcast: it decides the nominal occupation every rank builds its basis
+    from, and a rank-local answer would have different ranks generating different determinants.
+    """
+    sector = None
+    if comm is None or comm.rank == 0:
+        try:
+            with h5.File(hdf5_filename, "r") as f:
+                it = int(f.attrs.get("last iteration", 1))
+                group_name = f"{label.strip()} {it}"
+                if group_name in f:
+                    sector = f[group_name].attrs.get("DC ground state sector", None)
+        except (OSError, KeyError):
+            sector = None
+    if comm is not None:
+        sector = comm.bcast(sector, root=0)
+    return None if sector is None else int(sector)
+
+
+def _split_total_over_groups(total, nominal_occ):
+    """Distribute an impurity charge ``total`` over the groups of ``nominal_occ``.
+
+    Keeps the incoming split as the shape and moves only the difference, so a multi-group
+    impurity (an ``eg``/``t2g`` split) stays near the filling RSPt asked for instead of being
+    re-derived from scratch. The groups redistribute freely at fixed total inside the solver
+    anyway (``basis_generation.generate_initial_basis``), so this only has to be a sensible seed.
+    """
+    occ = dict(nominal_occ)
+    delta = int(total) - sum(occ.values())
+    keys = sorted(occ)
+    step = 1 if delta > 0 else -1
+    while delta != 0 and keys:
+        moved = False
+        for key in keys:
+            if delta == 0:
+                break
+            if occ[key] + step >= 0:
+                occ[key] += step
+                delta -= step
+                moved = True
+        if not moved:
+            break
+    return occ
+
+
 @ffi.def_extern()
+def _parse_dc_line(dc_line):
+    """Parse RSPt's 100-character double-counting line into ``(mode, target, alpha)``.
+
+    Pulled out of :func:`run_impmod_ed` so the grammar can be tested without a cffi handle and a
+    live RSPt call. Nothing about it changed in the move; the 100-character line itself is fixed
+    by RSPt (it rewrites that line for DC in {-4,-5,-14,-15}), so the grammar can only be
+    extended, never restructured.
+
+    Returns
+    -------
+    (str, float or None, float)
+        The criterion name, its numeric target (``None`` where the criterion takes none), and the
+        damping factor.
+    """
+    dc_line = dc_line.split("!")[0]
+    dc_line = dc_line.split("#")[0]
+    dc_array = dc_line.strip().split()
+
+    # Optional damping, 'alpha X' anywhere on the line (B4): RSPt applies the returned DC
+    # verbatim, with no mixing of its own against the previous iteration's value -- an
+    # undamped full Newton step on a problem whose target (the charge density) moves
+    # underneath it each CSC iteration, combined with a search that can return a point right
+    # at a charge-sector boundary (dc_search._refine_bracket), is a d8/d9 limit-cycle
+    # generator. Damp on our side, against OUR previous answer read back from the archive
+    # (_previous_damped_dc): DC_new = DC_prev + alpha * (DC_converged - DC_prev), and
+    # DC_new = DC_converged when there is no previous answer. Parsed and stripped before
+    # the mode-specific parsing below, so it can follow either a peak position or 'occ [N]'.
+    dc_alpha = 0.5
+    for _i, _token in enumerate(dc_array):
+        if _token.lower() == "alpha":
+            assert _i + 1 < len(dc_array), "'alpha' on the double-counting line needs a value"
+            dc_alpha = float(dc_array[_i + 1])
+            del dc_array[_i : _i + 2]
+            break
+
+    # Double counting criteria:
+    #   <peak_position>        -- place a spectral peak at the given energy
+    #                             (E[N+1]-E[N] if positive, E[N]-E[N-1] if
+    #                             negative)
+    #   gap [offset]           -- centre mu_dc in the impurity gap, i.e. put the midpoint
+    #                             (E[N+1]-E[N-1])/2 of the removal and addition excitations
+    #                             at `offset` (default 0, the Fermi level). RECOMMENDED FOR
+    #                             INSULATORS: Karolak et al. (arXiv:1004.4569) show the
+    #                             occupation condition below "essentially breaks down" for a
+    #                             charge-transfer insulator -- inside a gap the occupation is
+    #                             flat, so a whole interval of mu satisfies it and none of
+    #                             them is picked out. For NiO they get 25.3 eV this way
+    #                             against 20.4 (SC)AMF, and show 21 eV is qualitatively wrong.
+    #   occ <occupation>       -- fix the thermal impurity occupation (Karolak's Eq. 2;
+    #                             the right criterion for metals)
+    #   fll | amf | sigma_inf  -- static schemes (dc_static.py), evaluated at the DFT
+    #                             reference occupation/density matrix (no ED solve)
+    #   nominal                -- FLL at the NOMINAL (integer) occupation, not the DFT
+    #                             reference (M4): needs no reference filling, so it cannot
+    #                             saturate and cannot inherit the fit-resolution sensitivity
+    #                             B1 measures for the other schemes. The natural dc_guess for
+    #                             CSC iteration 1, or a reference to check a converged
+    #                             fixed_occupation_dc answer against.
+    # Any may be followed by 'alpha <value>' (parsed and removed above).
+    _STATIC_SCHEMES = {"fll", "amf", "sigma_inf", "sigmainf", "nominal"}
+    if len(dc_array) > 0 and dc_array[0].lower() == "gap":
+        assert len(dc_array) <= 2, (
+            "impurityModel gap double counting takes at most 1 argument, the offset of the "
+            f"gap centre from the Fermi level. Got: {dc_array}"
+        )
+        dc_mode = "gap"
+        dc_target = float(dc_array[1]) if len(dc_array) == 2 else 0.0
+    elif len(dc_array) > 0 and dc_array[0].lower() in {"occ", "occupation"}:
+        assert len(dc_array) <= 2, (
+            "impurityModel occupation double counting takes at most 1 "
+            f"argument, the target impurity occupation. Got: {dc_array}"
+        )
+        dc_mode = "occupation"
+        dc_target = None
+        if len(dc_array) == 2:
+            dc_target = float(dc_array[1])
+    elif len(dc_array) > 0 and dc_array[0].lower() in _STATIC_SCHEMES:
+        assert len(dc_array) == 1, (
+            "impurityModel static double counting (fll, amf, sigma_inf, nominal) takes no "
+            f"further arguments (besides 'alpha <value>', already parsed). Got: {dc_array}"
+        )
+        dc_mode = dc_array[0].lower()
+        dc_target = None
+    else:
+        assert len(dc_array) == 1, (
+            "impurityModel double counting takes 1 argument, peak_position, "
+            "'gap [offset]', 'occ [target impurity occupation]', or one of "
+            "fll/amf/sigma_inf/nominal. "
+            f"Got: {dc_array}"
+        )
+        dc_mode = "peak"
+        dc_target = float(dc_array[0])
+
+    return dc_mode, dc_target, dc_alpha
+
+
 def run_impmod_ed(
     rspt_label,
     rspt_solver_line,
@@ -482,6 +692,25 @@ def run_impmod_ed(
     if any(n0 > n_orb for n0 in nominal_occ.values()) or any(n0 < 0 for n0 in nominal_occ.values()):
         raise RuntimeError(f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]")
 
+    if rspt_dc_flag != 1:
+        # Seed the ground-state search with the charge sector the double-counting search settled
+        # on for this same iteration. The DC is only meaningful if this solve lands on the state
+        # the DC was measured against, and the sector walk is the one step that can legitimately
+        # land elsewhere -- it is a discrete choice, so a small change in the incoming
+        # hybridization can flip it. RSPt calls run_impmod_ed twice per CSC iteration in one
+        # process, so the answer from the first call is available here; the walk still runs and
+        # can still move, but it starts where the DC search finished rather than at RSPt's
+        # nominal.
+        dc_sector = _double_counting_sector(hdf5_filename, label, comm)
+        if dc_sector is not None and dc_sector != sum(nominal_occ.values()):
+            if rank == 0:
+                print(
+                    f"Seeding the ground-state search at the double-counting search's sector "
+                    f"{dc_sector} (nominal {sum(nominal_occ.values())})."
+                )
+            nominal_occ = _split_total_over_groups(dc_sector, nominal_occ)
+            basis = replace(basis, nominal_occ=nominal_occ)
+
     if abs(w[1] - w[0]) > eim / 2 and rank == 0:
         print(
             "WARNING: Your real frequency mesh is rather coarse. Recommended dE <= eim/5, "
@@ -616,72 +845,18 @@ def run_impmod_ed(
         report_continuum_reference(h_dft, hyb, hyb_fit, w, eim, tau, n0_disc, rank=rank)
 
     if rspt_dc_flag == 1:
-        dc_line = ffi.string(rspt_dc_line, 100).decode("ascii")
-        dc_line = dc_line.split("!")[0]
-        dc_line = dc_line.split("#")[0]
-        dc_array = dc_line.strip().split()
+        dc_mode, dc_target, dc_alpha = _parse_dc_line(ffi.string(rspt_dc_line, 100).decode("ascii"))
 
-        # Optional damping, 'alpha X' anywhere on the line (B4): RSPt applies the returned DC
-        # verbatim, with no mixing of its own against the previous iteration's value -- an
-        # undamped full Newton step on a problem whose target (the charge density) moves
-        # underneath it each CSC iteration, combined with a search that can return a point right
-        # at a charge-sector boundary (dc_search._refine_bracket), is a d8/d9 limit-cycle
-        # generator. Damp on our side: DC_new = dc_guess + alpha * mu. Parsed and stripped before
-        # the mode-specific parsing below, so it can follow either a peak position or 'occ [N]'.
-        dc_alpha = 0.5
-        for _i, _token in enumerate(dc_array):
-            if _token.lower() == "alpha":
-                assert _i + 1 < len(dc_array), "'alpha' on the double-counting line needs a value"
-                dc_alpha = float(dc_array[_i + 1])
-                del dc_array[_i : _i + 2]
-                break
-
-        # Double counting criteria:
-        #   <peak_position>        -- place a spectral peak at the given energy
-        #                             (E[N+1]-E[N] if positive, E[N]-E[N-1] if
-        #                             negative)
-        #   occ <occupation>       -- fix the thermal impurity occupation
-        #   fll | amf | sigma_inf  -- static schemes (dc_static.py), evaluated at the DFT
-        #                             reference occupation/density matrix (no ED solve)
-        #   nominal                -- FLL at the NOMINAL (integer) occupation, not the DFT
-        #                             reference (M4): needs no reference filling, so it cannot
-        #                             saturate and cannot inherit the fit-resolution sensitivity
-        #                             B1 measures for the other schemes. The natural dc_guess for
-        #                             CSC iteration 1, or a reference to check a converged
-        #                             fixed_occupation_dc answer against.
-        # Any may be followed by 'alpha <value>' (parsed and removed above).
-        _STATIC_SCHEMES = {"fll", "amf", "sigma_inf", "sigmainf", "nominal"}
-        if len(dc_array) > 0 and dc_array[0].lower() in {"occ", "occupation"}:
-            assert len(dc_array) <= 2, (
-                "impurityModel occupation double counting takes at most 1 "
-                f"argument, the target impurity occupation. Got: {dc_array}"
-            )
-            dc_mode = "occupation"
-            dc_target = None
-            if len(dc_array) == 2:
-                dc_target = float(dc_array[1])
-        elif len(dc_array) > 0 and dc_array[0].lower() in _STATIC_SCHEMES:
-            assert len(dc_array) == 1, (
-                "impurityModel static double counting (fll, amf, sigma_inf, nominal) takes no "
-                f"further arguments (besides 'alpha <value>', already parsed). Got: {dc_array}"
-            )
-            dc_mode = dc_array[0].lower()
-            dc_target = None
-        else:
-            assert len(dc_array) == 1, (
-                "impurityModel double counting takes 1 argument, peak_position, "
-                "'occ [target impurity occupation]', or one of fll/amf/sigma_inf/nominal. "
-                f"Got: {dc_array}"
-            )
-            dc_mode = "peak"
-            dc_target = float(dc_array[0])
-
+        # The charge sector the ED criteria settle on, handed to this iteration's self-energy
+        # call so it starts from the state the DC was measured against (see
+        # _double_counting_sector). None for the static schemes, which run no ground-state solve.
+        dc_sector = None
         try:
             if dc_mode == "occupation":
                 # Scale the shift search with the real-frequency mesh, so the
                 # steps are sensible in any energy unit (RSPt supplies Ry).
                 bandwidth = w[-1] - w[0]
-                dc_cf = fixed_occupation_dc(
+                dc_cf, dc_sector = fixed_occupation_dc(
                     model,
                     basis,
                     solver,
@@ -690,15 +865,27 @@ def run_impmod_ed(
                     verbosity=verbosity,
                     initial_step=bandwidth / 100,
                     max_shift=bandwidth,
+                    return_sector=True,
+                )
+            elif dc_mode == "gap":
+                dc_cf, dc_sector = fixed_gap_dc(
+                    model,
+                    basis,
+                    solver,
+                    offset=dc_target,
+                    comm=comm,
+                    verbosity=verbosity,
+                    return_sector=True,
                 )
             elif dc_mode == "peak":
-                dc_cf = fixed_peak_dc(
+                dc_cf, dc_sector = fixed_peak_dc(
                     model,
                     basis,
                     solver,
                     peak_position=dc_target,
                     comm=comm,
                     verbosity=verbosity,
+                    return_sector=True,
                 )
             elif dc_mode == "fll":
                 dc_cf = fll_dc(model, tau=tau)
@@ -709,13 +896,20 @@ def run_impmod_ed(
             else:
                 assert dc_mode == "nominal"
                 dc_cf = nominal_dc(model, sum(nominal_occ.values()))
-            # B4: damp the search's full-shift answer against the guess it started from --
-            # dc_guess + alpha*mu -- rather than persisting a bare mu, which is meaningless
-            # without knowing which dc_guess it was relative to (dc_search's own module
-            # docstring; this cost the campaign three rounds of confusion before it was fixed in
-            # reporting, and would cost RSPt a limit cycle if repeated here). sig_dc_cf is this
-            # call's dc_guess, already in the CF basis dc_cf shares.
-            damped_dc_cf = sig_dc_cf + dc_alpha * (dc_cf - sig_dc_cf)
+            # Damp against OUR OWN previous answer, read back from the archive -- not against
+            # sig_dc_cf. sig_dc_cf is not a continuation of anything we returned: RSPt zeroes
+            # sig_dc at the top of every double_counting call (green_double_counting.F90:73)
+            # and refills it with its own FLL/AMF `alocal` (:340-371, trace-renormalised against
+            # solver_wisdom at :406-425), and impurityModel's answer is never written back into
+            # solver_wisdom. Damping toward it therefore returned `alocal + alpha*mu` -- a double
+            # counting that does NOT satisfy the criterion the search just converged, on every
+            # CSC iteration. With no previous answer on record (the first iteration) there is
+            # nothing to damp against, so the converged value is returned undamped.
+            previous_dc_cf = _previous_damped_dc(hdf5_filename, label, comm)
+            if previous_dc_cf is None:
+                damped_dc_cf = dc_cf
+            else:
+                damped_dc_cf = previous_dc_cf + dc_alpha * (dc_cf - previous_dc_cf)
             if comm.rank == 0:
                 # Persist the full damped DC matrix (never the bare mu) and fingerprint it
                 # against the dc_guess it was computed from, so the archive can be audited for
@@ -727,11 +921,33 @@ def run_impmod_ed(
                     if group_name not in f:
                         f.create_group(group_name)
                     cluster_g = f[group_name]
-                    cluster_g.attrs["DC damping alpha"] = dc_alpha
+                    cluster_g.attrs["DC damping alpha"] = dc_alpha if previous_dc_cf is not None else 1.0
                     cluster_g.attrs["DC guess fingerprint"] = hashlib.sha256(
                         np.ascontiguousarray(sig_dc_cf).tobytes()
                     ).hexdigest()
+                    # The value actually converged by the criterion, before damping. "DC damped"
+                    # is what RSPt receives; this is what the criterion says the answer is, and
+                    # the two coincide on the first iteration by construction.
+                    h5_write_dataset(cluster_g, "DC converged", dc_cf)
                     h5_write_dataset(cluster_g, "DC damped", damped_dc_cf)
+                    if dc_sector is not None:
+                        cluster_g.attrs["DC ground state sector"] = int(dc_sector)
+            # A second record, in the same format and through the same formatter, for the one
+            # number the criterion could not report: it printed the dc it *converged*, and what
+            # RSPt receives is that value damped toward the previous iteration's answer. A reader
+            # taking `dc_level` from the criterion's block as "what was applied" would be wrong on
+            # every iteration after the first. A bare adjacent line was the first attempt and is
+            # worse than useless for the stated goal -- it falls outside the delimiters, so
+            # anything parsing between header and footer never sees it.
+            applied_alpha = dc_alpha if previous_dc_cf is not None else 1.0
+            applied = {
+                "criterion": f"{dc_mode} (applied)",
+                "status": "damped" if previous_dc_cf is not None else "undamped",
+                "alpha": applied_alpha,
+            }
+            applied["dc_trace"], applied["dc_level"] = dc_levels(damped_dc_cf)
+            applied["dc_spread"] = dc_spread(damped_dc_cf)
+            emit_dc_record(applied, rank=comm.rank)
             # The double counting is calculated in the CF basis, RSPt expects
             # it in the corr basis.
             sig_dc[:, :] = rotate_matrix(damped_dc_cf, np.conj(corr_to_cf.T))
@@ -1021,9 +1237,9 @@ def fit_hyb_star(
                 it = ar.attrs["last iteration"]
                 fit_g = ar[f"{label} {it}/Bath fit"]
                 stored_fingerprint = fit_g.attrs.get("hyb fingerprint", None)
-                if stored_fingerprint == hyb_fingerprint and fit_g.attrs.get(
-                    "block structure", ""
-                ) == repr(block_structure):
+                if stored_fingerprint == hyb_fingerprint and fit_g.attrs.get("block structure", "") == repr(
+                    block_structure
+                ):
                     print("Reading stored bath energies and hopping parameters")
                     vs_star = []
                     ebs_star = []
@@ -1058,8 +1274,7 @@ def fit_hyb_star(
             )
         else:
             print(
-                f"Bath fit computed fresh for {label!r} {iteration_label} (no fit stored yet "
-                "this iteration).",
+                f"Bath fit computed fresh for {label!r} {iteration_label} (no fit stored yet " "this iteration).",
                 flush=True,
             )
     if comm is not None:
