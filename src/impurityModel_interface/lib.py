@@ -677,13 +677,11 @@ def run_impmod_ed(
             f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}.out",
             "w",
         )
-    elif verbosity > 0:
+    else:
         sys.stdout = open(  # noqa: SIM115
             f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}-{rank}.out",
             "w",
         )
-    else:
-        sys.stdout = open(devnull, "w")  # noqa: SIM115
 
     hdf5_filename = "impurityModel_data.h5"
     _nominal_occ, bath_states_per_orbital, fit_options, basis, solver = parse_solver_line(solver_line)
