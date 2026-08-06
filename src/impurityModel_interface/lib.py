@@ -459,7 +459,6 @@ def _split_total_over_groups(total, nominal_occ):
     return occ
 
 
-@ffi.def_extern()
 def _parse_dc_line(dc_line):
     """Parse RSPt's 100-character double-counting line into ``(mode, target, alpha)``.
 
@@ -556,6 +555,7 @@ def _parse_dc_line(dc_line):
     return dc_mode, dc_target, dc_alpha
 
 
+@ffi.def_extern()
 def run_impmod_ed(
     rspt_label,
     rspt_solver_line,
@@ -685,6 +685,7 @@ def run_impmod_ed(
     else:
         sys.stdout = open(devnull, "w")  # noqa: SIM115
 
+    hdf5_filename = "impurityModel_data.h5"
     _nominal_occ, bath_states_per_orbital, fit_options, basis, solver = parse_solver_line(solver_line)
     # tau is not part of the solver line; inject the external temperature onto the basis options.
     basis = replace(basis, tau=tau)
@@ -732,7 +733,6 @@ def run_impmod_ed(
     # in the CF basis.
     sig_dc_cf = rotate_matrix(sig_dc, corr_to_cf)
 
-    hdf5_filename = "impurityModel_data.h5"
     (
         H_imp,
         impurity_indices,
