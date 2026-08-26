@@ -71,6 +71,7 @@ try:
         Meshes,
         SolverOptions,
         amf_dc,
+        apply_environment,
         calc_selfenergy,
         dc_levels,
         dc_spread,
@@ -79,7 +80,9 @@ try:
         fixed_gap_dc,
         fixed_occupation_dc,
         fixed_peak_dc,
+        find_environment_file,
         fll_dc,
+        load_environment,
         nominal_dc,
         report_continuum_reference,
         save_Greens_function,
@@ -555,8 +558,7 @@ def _parse_dc_line(dc_line):
     return dc_mode, dc_target, dc_alpha
 
 
-@ffi.def_extern()
-def run_impmod_ed(
+def _run_impmod_ed(
     rspt_label,
     rspt_solver_line,
     rspt_dc_line,
@@ -677,11 +679,12 @@ def run_impmod_ed(
             f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}.out",
             "w",
         )
-    else:
+    elif verbosity > 0:
         sys.stdout = open(  # noqa: SIM115
             f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}-{rank}.out",
             "w",
         )
+    verbosity = comm.bcast(verbosity)
 
     hdf5_filename = "impurityModel_data.h5"
     _nominal_occ, bath_states_per_orbital, fit_options, basis, solver = parse_solver_line(solver_line)
@@ -1051,6 +1054,37 @@ def run_impmod_ed(
     sys.stdout = stdout_save
     comm.barrier()
     return er
+
+
+@ffi.def_extern()
+def run_impmod_ed(*args):
+    """Entry point RSPt calls, wrapping the solve in whatever ``[environment]`` asks for.
+
+    RSPt configures the solver through two fixed-width strings and a label, and this callback
+    has no argument to pass a file path through -- nor are RSPt's own sources ours to change.
+    So the input file is found by convention: ``impurityModel.toml`` in the working directory,
+    or wherever ``IMPURITYMODEL_INPUT`` points. Only its ``[environment]`` table is read; the
+    rest of such a file describes a model, and on this path RSPt supplies the model itself, so
+    reading more would create two sources of truth for the same physics.
+
+    Two rules this path needs and the command line does not:
+
+    * The knobs are **restored on the way out**. This callback runs once per cluster label per
+      self-consistency iteration, plus again for the double-counting pass, so a knob left set
+      would silently carry into the next one.
+    * A variable **already set in the environment wins**, and is reported as skipped -- the
+      same rule this module already applies to ``OMP_NUM_THREADS`` above. A value someone
+      exported in their submit script should not be quietly overridden by a file.
+    """
+    comm = MPI.COMM_WORLD
+    path = find_environment_file()
+    knobs = load_environment(path, comm=comm) if path else {}
+    with apply_environment(knobs, override=False) as skipped:
+        if knobs and comm.rank == 0:
+            print(f"Applying {len(knobs)} tuning knob(s) from {path}.", file=sys.stderr)
+            for name in skipped:
+                print(f"  {name}: kept the value already set in the environment.", file=sys.stderr)
+        return _run_impmod_ed(*args)
 
 
 def get_ed_h0(
