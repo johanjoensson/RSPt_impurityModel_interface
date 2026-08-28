@@ -685,7 +685,7 @@ def _run_impmod_ed(
             "w",
         )
     else:
-        sys.stdout = devnull
+        sys.stdout = open(devnull, "w")
     verbosity = comm.bcast(verbosity)
 
     hdf5_filename = "impurityModel_data.h5"
