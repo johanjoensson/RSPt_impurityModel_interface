@@ -684,6 +684,8 @@ def _run_impmod_ed(
             f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}-{rank}.out",
             "w",
         )
+    else:
+        sys.stdout = devnull
     verbosity = comm.bcast(verbosity)
 
     hdf5_filename = "impurityModel_data.h5"
