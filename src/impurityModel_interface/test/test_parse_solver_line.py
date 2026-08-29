@@ -38,6 +38,13 @@ def test_minimal_line():
     assert basis.nominal_occ == {0: 8}
 
 
+def test_freeze_bath_energies_is_off_by_default_and_opt_in():
+    _, _, fit_options, _, _ = parse_solver_line("8 10 4 peeled")
+    assert fit_options["freeze_bath_energies"] is False
+    _, _, fit_options, _, _ = parse_solver_line("8 10 4 peeled freeze_bath_energies")
+    assert fit_options["freeze_bath_energies"] is True
+
+
 @pytest.mark.parametrize("comment_char", ["!", "#"])
 def test_comments_are_stripped(comment_char):
     n0, n_baths, fit_options, basis, _solver = parse_solver_line(
@@ -120,8 +127,9 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["gamma"] == pytest.approx(0.1)
     assert attrs["weight_function"] == "gaussian"
     assert attrs["fit_unocc"] is True
-    # Every option the archive stores is present (the 17 solver-line keys).
-    assert len(attrs) == 17
+    assert attrs["freeze_bath_energies"] is False
+    # Every option the archive stores is present (the 18 solver-line keys).
+    assert len(attrs) == 18
 
 
 def test_unknown_argument_raises():

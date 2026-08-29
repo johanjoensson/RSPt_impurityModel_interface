@@ -111,6 +111,10 @@ def parse_solver_line(solver_line):
       periodic | partial (pro) | selective | full -- Reorthogonalization mode.
       star | chain | linked_chain | peeled -- Bath geometry.
       fit_unocc | fit_occ                  -- Also fit unoccupied bath states / only occupied (default).
+      freeze_bath_energies                 -- Reuse the previous iteration's bath energies and
+                                              only re-solve the hoppings (least squares); no
+                                              bath-energy optimization. Off by default; the
+                                              first iteration (nothing stored) does a full fit.
       gamma X                              -- Regularization parameter for the bath fit.
       dense_cutoff N                       -- Use dense eigensolver below this matrix size.
       <weight function name>               -- Weight function for the fit; one of
@@ -148,6 +152,7 @@ def parse_solver_line(solver_line):
         "dense_cutoff": 1000,
         "reort": "none",
         "fit_unocc": False,
+        "freeze_bath_energies": False,
         "gamma": 0.01,
         "weight_function": "unit",
         "weight": 2,
@@ -198,6 +203,8 @@ def parse_solver_line(solver_line):
                 options["fit_unocc"] = True
             elif arg.lower() == "fit_occ":
                 options["fit_unocc"] = False
+            elif arg.lower() == "freeze_bath_energies":
+                options["freeze_bath_energies"] = True
             elif arg.lower() == "weight_w0":
                 options["weight_w0"] = float(solver_array[i + 1])
                 skip_next = True
@@ -246,6 +253,7 @@ def parse_solver_line(solver_line):
         f"Bath states per imp. orb. |> {nBaths}\n"
         f"Bath geometry             |> {options['bath_geometry']}\n"
         f"Fit unoccupied states     |> {options['fit_unocc']}\n"
+        f"Freeze bath energies      |> {options['freeze_bath_energies']}\n"
         f"Generate spin fliped Djs  |> {options['spin_flip_dj']}\n"
         f"Reorthogonalizaion mode   |> {options['reort']}\n"
         f"Dense matrix size cutoff  |> {options['dense_cutoff']}\n"
@@ -271,6 +279,7 @@ def parse_solver_line(solver_line):
             "weight",
             "weight_w0",
             "fit_unocc",
+            "freeze_bath_energies",
             "bath_geometry",
             "collapse_chains",
         )
@@ -409,6 +418,54 @@ def _previous_damped_dc(hdf5_filename, label, comm):
     if comm is not None:
         previous = comm.bcast(previous, root=0)
     return previous
+
+
+def _previous_bath_energies(hdf5_filename, label, block_structure):
+    """The bath energies from the most recent stored fit, one array per inequivalent block.
+
+    For ``freeze_bath_energies``: unlike the fingerprint-keyed reuse in ``fit_hyb_star``, this
+    ignores the hybridization fingerprint and the iteration boundary -- it just wants the last
+    energies the fitter produced, to hold them fixed while only the hoppings are re-solved
+    against this iteration's hybridization. Returns ``None`` when nothing is stored yet (the
+    first iteration), which the caller reads as "fall back to a full fit this once".
+
+    Read on rank 0; the caller broadcasts. Energies are de-duplicated (the archive stores the
+    post-``flatten_star_levels`` list, with one entry per coupled orbital component).
+    """
+    try:
+        with h5.File(hdf5_filename, "r") as ar:
+            current = int(ar.attrs.get("last iteration", 1))
+            for it in range(current, 0, -1):
+                fit_g = ar.get(f"{label.strip()} {it}/Bath fit")
+                if fit_g is None or "ebs_star" not in fit_g:
+                    continue
+                return [
+                    np.unique(np.asarray(fit_g[f"ebs_star/{block_index}"], dtype=float))
+                    for block_index in block_structure.inequivalent_blocks
+                ]
+    except (OSError, KeyError):
+        pass
+    return None
+
+
+def _record_dc_audit_attr(hdf5_filename, label, comm, attr, value):
+    """Stamp one audit attribute onto this iteration's cluster group (rank 0 only).
+
+    Used by the DC branch's failure handlers -- ``"DC search unreachable"`` (the target has
+    no solution) and ``"DC search failed"`` (a solver blew up) -- so a charge-self-consistent
+    run can afterwards be audited for which iterations actually determined a double counting
+    and which fell back to the previous value. Creates the group if the self-energy pass has
+    not written it yet. No-op on non-root ranks; the caller does not broadcast because nothing
+    downstream reads the attribute back.
+    """
+    if comm is not None and comm.rank != 0:
+        return
+    with h5.File(hdf5_filename, "a") as f:
+        it = f.attrs.get("last iteration", 1)
+        group_name = f"{label.strip()} {it}"
+        if group_name not in f:
+            f.create_group(group_name)
+        f[group_name].attrs[attr] = value
 
 
 def _double_counting_sector(hdf5_filename, label, comm):
@@ -758,6 +815,7 @@ def _run_impmod_ed(
         imag_only=False,
         valence_bath_only=not fit_options["fit_unocc"],
         bath_geometry=fit_options["bath_geometry"],
+        freeze_bath_energies=fit_options["freeze_bath_energies"],
         label=label.strip(),
         hdf5_filename=hdf5_filename,
         verbose=(verbosity >= 1 or rspt_dc_flag == 1),
@@ -966,26 +1024,29 @@ def _run_impmod_ed(
             print(f"Exception {e!r} caught on rank {rank}!")
             print("DOUBLE COUNTING SEARCH COULD NOT REACH ITS TARGET. Returning initial DC unchanged.")
             print("!" * 100, flush=True)
-            if comm.rank == 0:
-                with h5.File(hdf5_filename, "a") as f:
-                    it = f.attrs.get("last iteration", 1)
-                    group_name = f"{label.strip()} {it}"
-                    if group_name not in f:
-                        f.create_group(group_name)
-                    f[group_name].attrs["DC search unreachable"] = str(e)
+            _record_dc_audit_attr(hdf5_filename, label, comm, "DC search unreachable", str(e))
             er = 0
         except Exception as e:
+            # A solver failure inside the DC search (a Lanczos/SVD non-convergence, an
+            # out-of-memory sector solve, ...) is not a reason to destroy a multi-hour CSC
+            # run: like the DoubleCountingUnreachable branch above, leave sig_dc holding
+            # RSPt's incoming DC unchanged (it was never written on this path), record the
+            # failure in the archive so the run can be audited for which iterations actually
+            # determined a DC, and let the self-consistency loop carry on with the previous
+            # value. The DC search raises rank-synchronously by construction (its verdicts are
+            # broadcast and genuinely rank-local failure conditions Abort rather than raise --
+            # see dc_search / dc_criteria), so every rank reaches this handler together and a
+            # plain continue does not desync the collective barrier at the end of the call.
             print("!" * 100)
             print(f"Exception {e!r} caught on rank {rank}!")
             print(traceback.format_exc())
             print(
-                "Adding positive infinity to the imaginary part of the DC selfenergy.",
+                "DOUBLE COUNTING SEARCH FAILED. Returning initial DC unchanged.",
                 flush=True,
             )
             print("!" * 100)
-            sig_dc[:, :] = np.inf + 1j * np.inf
-            er = -1
-            comm.Abort(er)
+            _record_dc_audit_attr(hdf5_filename, label, comm, "DC search failed", f"{e!r}\n{traceback.format_exc()}")
+            er = 0
     else:
         try:
             # The ImpurityModel and the basis/solver option groups were built above (from the
@@ -1103,6 +1164,7 @@ def get_ed_h0(
     imag_only=False,
     valence_bath_only=True,
     bath_geometry="peeled_linked_chain",
+    freeze_bath_energies=False,
     label=None,
     hdf5_filename="impurityModel_data.h5",
     verbose=True,
@@ -1166,6 +1228,7 @@ def get_ed_h0(
         verbose,
         comm,
         hyb_fingerprint=hyb_fingerprint,
+        freeze_bath_energies=freeze_bath_energies,
     )
 
     # rspt2spectra turns the (flattened) star fit into the requested bath
@@ -1243,6 +1306,7 @@ def fit_hyb_star(
     verbose,
     comm,
     hyb_fingerprint="",
+    freeze_bath_energies=False,
 ):
     vs_star = None
     ebs_star = None
@@ -1315,6 +1379,28 @@ def fit_hyb_star(
         ebs_star = comm.bcast(ebs_star, root=0)
         vs_star = comm.bcast(vs_star, root=0)
         shifts = comm.bcast(shifts, root=0)
+
+    # freeze_bath_energies: hold the bath energies fixed at the most recent stored fit and
+    # re-solve only the hoppings against this iteration's hybridization. Skipped when the exact
+    # fit was just reused (``ebs_star`` already set, rank-consistent after the bcast above) --
+    # that path already returns a consistent model -- and on the first iteration, where nothing
+    # is stored yet, we do a full fit once. Gated on ``ebs_star is None`` rather than
+    # ``read_hopping`` so every rank takes the same branch into the collective below.
+    frozen_ebs = None
+    if freeze_bath_energies and ebs_star is None:
+        if comm is None or comm.rank == 0:
+            frozen_ebs = _previous_bath_energies(hdf5_filename, label, block_structure)
+        if comm is not None:
+            frozen_ebs = comm.bcast(frozen_ebs, root=0)
+        if comm is None or comm.rank == 0:
+            if frozen_ebs is None:
+                print(
+                    "freeze_bath_energies is set but no previous bath fit is stored; doing a full fit this iteration.",
+                    flush=True,
+                )
+            else:
+                print("Bath energies FROZEN at the previous fit; re-solving hoppings only.", flush=True)
+
     if ebs_star is None:
         trace_phase_hyb = np.sum(np.diagonal(phase_hyb, axis1=1, axis2=2), axis=1)
         w_min = w[np.argmax(np.abs(trace_phase_hyb) > 1e-6)]
@@ -1330,8 +1416,8 @@ def fit_hyb_star(
             verbose=verbose,
             comm=comm,
             weight_fun=get_weight_function(weight_function, weight_w0, exp_weight),
-            ebs_guess=ebs_star,
-            vs_guess=vs_star,
+            ebs_guess=frozen_ebs,
+            optimize_bath_energies=frozen_ebs is None,
         )
     for i in range(len(ebs_star)):
         if len(ebs_star[i]) == 0:
