@@ -529,9 +529,10 @@ def _parse_dc_line(dc_line):
 
     Returns
     -------
-    (str, float or None, float)
-        The criterion name, its numeric target (``None`` where the criterion takes none), and the
-        damping factor.
+    (str, float or None, float, bool)
+        The criterion name, its numeric target (``None`` where the criterion takes none), the
+        damping factor, and whether ``gap``/``peak`` narrow their sector solves to the ground
+        multiplet.
     """
     dc_line = dc_line.split("!")[0]
     dc_line = dc_line.split("#")[0]
@@ -552,6 +553,30 @@ def _parse_dc_line(dc_line):
             assert _i + 1 < len(dc_array), "'alpha' on the double-counting line needs a value"
             dc_alpha = float(dc_array[_i + 1])
             del dc_array[_i : _i + 2]
+            break
+
+    # Optional 'ground_state_manifold' anywhere on the line, stripped the same way and for the
+    # same reason: it modifies *how* a criterion solves, not which criterion runs, so it has to
+    # compose with the spellings below rather than appear in each of their argument counts. Bare
+    # flag, no value.
+    #
+    # What it does: 'gap' and 'peak' ask each charge sector for its whole thermal manifold
+    # (`energy_cut(tau)`), then widen `num_wanted` until that window is exhausted. Their residual
+    # only ever reads `min(es)`, so on a workload whose N +- 1 spectrum is dense inside the window
+    # that widening is bought and thrown away -- measured on SrMnO3 cubic at a 512,000-determinant
+    # cap, four stacked solves per sector ending at 160 states. Setting this asks for the
+    # degenerate ground multiplet alone (`max_energy=0.0`).
+    #
+    # NOT free, and deliberately not the default: it also switches the criterion's reported
+    # impurity occupation from the thermal average to the ground state's, which are only the same
+    # where `occupation_spread` is negligible -- true on every fixture checked so far EXCEPT
+    # SrMnO3 (up to 0.065). That spread feeds `delta_sum` and so the reported `mu` resolution, not
+    # the root itself. Check it from a run with this flag OFF before turning it on.
+    dc_ground_state_manifold = False
+    for _i, _token in enumerate(dc_array):
+        if _token.lower() == "ground_state_manifold":
+            dc_ground_state_manifold = True
+            del dc_array[_i]
             break
 
     # Double counting criteria:
@@ -577,7 +602,10 @@ def _parse_dc_line(dc_line):
     #                             B1 measures for the other schemes. The natural dc_guess for
     #                             CSC iteration 1, or a reference to check a converged
     #                             fixed_occupation_dc answer against.
-    # Any may be followed by 'alpha <value>' (parsed and removed above).
+    # Any may be followed by 'alpha <value>' (parsed and removed above). 'gap' and 'peak' may
+    # also carry the bare flag 'ground_state_manifold' (likewise already parsed); every other
+    # spelling rejects it rather than silently ignoring it -- see the assertion below for why
+    # 'occ' is excluded on different grounds from the static schemes.
     _STATIC_SCHEMES = {"fll", "amf", "sigma_inf", "sigmainf", "nominal"}
     if len(dc_array) > 0 and dc_array[0].lower() == "gap":
         assert len(dc_array) <= 2, (
@@ -612,7 +640,31 @@ def _parse_dc_line(dc_line):
         dc_mode = "peak"
         dc_target = float(dc_array[0])
 
-    return dc_mode, dc_target, dc_alpha
+    # Only 'gap' and 'peak' take it, and the exclusions are two different facts:
+    #
+    #   * the static schemes (fll/amf/sigma_inf/nominal) run no ground-state solve at all, so
+    #     there is no manifold to narrow;
+    #   * 'occ' runs plenty of them, but its observable *is* the thermal impurity occupation
+    #     (`_evaluate_occupation_and_energy_at_mu` -> `thermal_average_scale_indep`), so
+    #     narrowing the manifold would change the criterion rather than the cost of evaluating
+    #     it. `fixed_occupation_dc` accordingly does not accept the argument -- it runs through
+    #     `_OccupationContext`/`solve_ground_state`, not `_SectorContext.sector_solve`.
+    #
+    # Rejected rather than ignored either way: a flag that reports as set and does nothing is
+    # the exact failure mode this file already documents for a misnamed knob.
+    assert not (dc_ground_state_manifold and dc_mode not in {"gap", "peak"}), (
+        "'ground_state_manifold' applies to the 'gap' and 'peak' double-counting criteria, whose "
+        "residual reads only each sector's lowest energy. "
+        + (
+            "'occ' pins the thermal impurity occupation itself, so narrowing the manifold would "
+            "change the criterion, not just its cost."
+            if dc_mode == "occupation"
+            else f"The static scheme '{dc_mode}' runs no ground-state solve."
+        )
+        + " Remove it from the double-counting line."
+    )
+
+    return dc_mode, dc_target, dc_alpha, dc_ground_state_manifold
 
 
 def _run_impmod_ed(
@@ -906,7 +958,7 @@ def _run_impmod_ed(
         report_continuum_reference(h_dft, hyb, hyb_fit, w, eim, tau, n0_disc, rank=rank)
 
     if rspt_dc_flag == 1:
-        dc_mode, dc_target, dc_alpha = _parse_dc_line(ffi.string(rspt_dc_line, 100).decode("ascii"))
+        dc_mode, dc_target, dc_alpha, dc_gs_manifold = _parse_dc_line(ffi.string(rspt_dc_line, 100).decode("ascii"))
 
         # The charge sector the ED criteria settle on, handed to this iteration's self-energy
         # call so it starts from the state the DC was measured against (see
@@ -936,6 +988,7 @@ def _run_impmod_ed(
                     offset=dc_target,
                     comm=comm,
                     verbosity=verbosity,
+                    ground_state_manifold=dc_gs_manifold,
                     return_sector=True,
                 )
             elif dc_mode == "peak":
@@ -946,6 +999,7 @@ def _run_impmod_ed(
                     peak_position=dc_target,
                     comm=comm,
                     verbosity=verbosity,
+                    ground_state_manifold=dc_gs_manifold,
                     return_sector=True,
                 )
             elif dc_mode == "fll":
