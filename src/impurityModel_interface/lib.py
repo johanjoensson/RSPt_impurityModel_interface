@@ -35,7 +35,9 @@ except ImportError:
     # the module can still be imported and the pure python helpers used.
     class _FFIStub:
         @staticmethod
-        def def_extern():
+        def def_extern(*args, **kwargs):
+            # The real ffi.def_extern takes an optional name and an optional error=; accept
+            # and ignore both, so the decorator below keeps working outside the embedding.
             return lambda func: func
 
         @staticmethod
@@ -694,11 +696,25 @@ def _run_impmod_ed(
     size_real,
     size_complex,
 ):
-    comm = MPI.COMM_WORLD
-    rank = comm.rank if comm is not None else 0
+    """Wrap RSPt's raw pointers as numpy views and hand them to :func:`_solve`.
 
+    The only function in this module that touches a cffi handle. Everything the physics
+    needs -- decoded strings and aliased numpy arrays -- is produced here, so :func:`_solve`
+    is plain Python and can be called directly from a test.
+
+    The views alias RSPt's memory; they are never copies. The four outputs (``sig``,
+    ``sig_real``, ``sig_static``, ``sig_dc``) are written back by in-place assignment, and
+    the inputs matter just as much -- the ``comm.Bcast`` calls in :func:`_solve` write
+    *through* ``h_dft``, ``u4`` and ``hyb`` into RSPt's own memory on non-root ranks. An
+    ``np.asarray(..., dtype=complex)`` anywhere below would silently break both, and no
+    single-rank test would notice.
+
+    ``n_iw``, ``n_w``, ``size_real`` and ``size_complex`` exist only to compute the byte
+    counts below, and are deliberately not forwarded.
+    """
     label = ffi.string(rspt_label, 18).decode("ascii")
     solver_line = ffi.string(rspt_solver_line, 100).decode("ascii")
+    dc_line = ffi.string(rspt_dc_line, 100).decode("ascii")
 
     h_dft = np.ndarray(
         buffer=ffi.buffer(rspt_h_dft, n_orb * n_orb * size_complex),
@@ -757,9 +773,67 @@ def _run_impmod_ed(
         dtype=complex,
     )
 
+    return _solve(
+        label=label,
+        solver_line=solver_line,
+        dc_line=dc_line,
+        dc_flag=rspt_dc_flag,
+        h_dft=h_dft,
+        u4=u4,
+        hyb=hyb,
+        iw=iw,
+        w=w,
+        sig=sig,
+        sig_real=sig_real,
+        sig_static=sig_static,
+        sig_dc=sig_dc,
+        corr_to_spherical_in=rspt_corr_to_spherical_arr,
+        corr_to_cf_in=rspt_corr_to_cf_arr,
+        n_orb=n_orb,
+        n_rot_cols=n_rot_cols,
+        n_orb_full=n_orb_full,
+        eim=eim,
+        tau=tau,
+        verbosity=verbosity,
+    )
+
+
+def _solve(
+    label,
+    solver_line,
+    dc_line,
+    dc_flag,
+    h_dft,
+    u4,
+    hyb,
+    iw,
+    w,
+    sig,
+    sig_real,
+    sig_static,
+    sig_dc,
+    corr_to_spherical_in,
+    corr_to_cf_in,
+    n_orb,
+    n_rot_cols,
+    n_orb_full,
+    eim,
+    tau,
+    verbosity,
+):
+    """Run the double-counting or selfenergy solve on already-marshalled arrays.
+
+    Pure Python: ``label``/``solver_line``/``dc_line`` are ``str`` and every array is a numpy
+    array. Split out of :func:`_run_impmod_ed` so it can be exercised without a cffi handle.
+
+    The arrays are the caller's, and are mutated in place -- see :func:`_run_impmod_ed`.
+    """
+    comm = MPI.COMM_WORLD
+    rank = comm.rank if comm is not None else 0
+
     corr_to_spherical, corr_to_cf = reconstruct_rotations(
-        rspt_corr_to_spherical_arr,
-        rspt_corr_to_cf_arr,
+        corr_to_spherical_in,
+        corr_to_cf_in,
         n_orb,
         n_rot_cols,
         n_orb_full,
@@ -785,12 +859,12 @@ def _run_impmod_ed(
     # is intentionally not used here.
     if rank == 0:
         sys.stdout = open(  # noqa: SIM115
-            f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}.out",
+            f"impurityModel-{label.strip()}{'-dc' if dc_flag == 1 else ''}.out",
             "w",
         )
     elif verbosity > 0:
         sys.stdout = open(  # noqa: SIM115
-            f"impurityModel-{label.strip()}{'-dc' if rspt_dc_flag == 1 else ''}-{rank}.out",
+            f"impurityModel-{label.strip()}{'-dc' if dc_flag == 1 else ''}-{rank}.out",
             "w",
         )
     else:
@@ -805,7 +879,7 @@ def _run_impmod_ed(
     if any(n0 > n_orb for n0 in nominal_occ.values()) or any(n0 < 0 for n0 in nominal_occ.values()):
         raise RuntimeError(f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]")
 
-    if rspt_dc_flag != 1:
+    if dc_flag != 1:
         # Seed the ground-state search with the charge sector the double-counting search settled
         # on for this same iteration. The DC is only meaningful if this solve lands on the state
         # the DC was measured against, and the sector walk is the one step that can legitimately
@@ -870,7 +944,7 @@ def _run_impmod_ed(
         freeze_bath_energies=fit_options["freeze_bath_energies"],
         label=label.strip(),
         hdf5_filename=hdf5_filename,
-        verbose=(verbosity >= 1 or rspt_dc_flag == 1),
+        verbose=(verbosity >= 1 or dc_flag == 1),
         extra_verbose=(verbosity >= 2),
         comm=comm,
     )
@@ -957,8 +1031,8 @@ def _run_impmod_ed(
         n0_disc = discretized_impurity_occupation(model, tau)
         report_continuum_reference(h_dft, hyb, hyb_fit, w, eim, tau, n0_disc, rank=rank)
 
-    if rspt_dc_flag == 1:
-        dc_mode, dc_target, dc_alpha, dc_gs_manifold = _parse_dc_line(ffi.string(rspt_dc_line, 100).decode("ascii"))
+    if dc_flag == 1:
+        dc_mode, dc_target, dc_alpha, dc_gs_manifold = _parse_dc_line(dc_line)
 
         # The charge sector the ED criteria settle on, handed to this iteration's self-energy
         # call so it starts from the state the DC was measured against (see
@@ -1173,7 +1247,45 @@ def _run_impmod_ed(
     return er
 
 
-@ffi.def_extern()
+# ``error=-1`` is load bearing. cffi's default for an uncaught exception in a callback is to
+# report it as unraisable and return **0**, and RSPt reads 0 as success
+# (``green_impmod_interface.F90``: ``if (er .ne. 0) call stopgreen(...)``), so a failed solve
+# would let the DMFT loop carry on with a stale ``acluster%sig``. The handler below is what
+# normally fires; this is the backstop for anything that escapes it, including a failure
+# inside the handler itself.
+def bind_rspt_callback():
+    """Attach :func:`run_impmod_ed` to the extern "Python" slot, if import time could not.
+
+    Normally the decorator below does this: RSPt's first call starts the interpreter, cffi
+    registers the ``run_impurityModel`` module, and only then does ``embedding_init_code``
+    import this package -- so ``from run_impurityModel import ffi`` at the top of this file
+    succeeds and the decorator is the real one.
+
+    Anything that imports this package *earlier* breaks that. A ``sitecustomize.py``, a
+    ``usercustomize.py`` or a ``.pth`` file on the path runs during ``Py_InitializeEx``,
+    before cffi has registered its module, so the import at the top falls back to
+    ``_FFIStub`` and the decorator becomes a no-op. cffi then answers every call with
+    ``"no code was attached to it yet ... Returning 0"`` -- RSPt reads 0 as a successful
+    solve, which is the exact failure this module exists to prevent, arriving by a third
+    route that neither ``error=-1`` nor the ``cffi_start_python()`` check in
+    ``library_builder.py`` can see.
+
+    ``embedding_init_code`` calls this after the import, when the module is guaranteed to
+    exist. It is a no-op on the normal path.
+    """
+    # Both of these are the point of the function, not an oversight: the module-level import
+    # is what failed, so the retry has to be deferred to here, and rebinding the module global
+    # is what makes ffi.string/ffi.buffer in _run_impmod_ed resolve to the real handle.
+    global ffi  # noqa: PLW0603
+    from run_impurityModel import ffi as embedded_ffi  # noqa: PLC0415
+
+    if ffi is embedded_ffi:
+        return
+    ffi = embedded_ffi
+    embedded_ffi.def_extern("run_impmod_ed_py", error=-1)(run_impmod_ed)
+
+
+@ffi.def_extern("run_impmod_ed_py", error=-1)
 def run_impmod_ed(*args):
     """Entry point RSPt calls, wrapping the solve in whatever ``[environment]`` asks for.
 
@@ -1193,15 +1305,44 @@ def run_impmod_ed(*args):
       same rule this module already applies to ``OMP_NUM_THREADS`` above. A value someone
       exported in their submit script should not be quietly overridden by a file.
     """
-    comm = MPI.COMM_WORLD
-    path = find_environment_file()
-    knobs = load_environment(path, comm=comm) if path else {}
-    with apply_environment(knobs, override=False) as skipped:
-        if knobs and comm.rank == 0:
-            print(f"Applying {len(knobs)} tuning knob(s) from {path}.", file=sys.stderr)
-            for name in skipped:
-                print(f"  {name}: kept the value already set in the environment.", file=sys.stderr)
-        return _run_impmod_ed(*args)
+    stdout_save = sys.stdout
+    try:
+        comm = MPI.COMM_WORLD
+        path = find_environment_file()
+        knobs = load_environment(path, comm=comm) if path else {}
+        with apply_environment(knobs, override=False) as skipped:
+            if knobs and comm.rank == 0:
+                print(f"Applying {len(knobs)} tuning knob(s) from {path}.", file=sys.stderr)
+                for name in skipped:
+                    print(f"  {name}: kept the value already set in the environment.", file=sys.stderr)
+            return _run_impmod_ed(*args)
+    except BaseException:
+        # Diagnostics go to sys.__stderr__, never print(): _solve redirects sys.stdout to the
+        # per-cluster .out file, so an exception raised while that redirect is live would send
+        # the traceback into the file nobody is watching -- or into a closed handle.
+        # BaseException, not Exception: a MemoryError or a signal mid-solve must still reach
+        # RSPt as a failure rather than as a silent success.
+        stream = sys.__stderr__ if sys.__stderr__ is not None else stdout_save
+        try:
+            rank = MPI.COMM_WORLD.rank
+        except Exception:
+            rank = "?"
+        print("!" * 100, file=stream)
+        print(f"impurityModel: unhandled exception on rank {rank}; returning -1 to RSPt.", file=stream)
+        traceback.print_exc(file=stream)
+        print("!" * 100, file=stream, flush=True)
+        return -1
+    finally:
+        # _solve restores sys.stdout itself on every path it runs to completion. This is the
+        # net for the paths it does not: without it a failure leaves sys.stdout pointing at a
+        # half-written .out file for the rest of the process, and the diagnostic for the very
+        # failure being reported is the thing that gets truncated.
+        if sys.stdout is not stdout_save:
+            try:
+                sys.stdout.close()
+            except Exception:
+                pass
+            sys.stdout = stdout_save
 
 
 def get_ed_h0(
@@ -1366,7 +1507,7 @@ def fit_hyb_star(
     ebs_star = None
     shifts = None
     read_hopping = False
-    # M2: RSPt calls run_impmod_ed twice per CSC iteration (rspt_dc_flag=1 to determine the DC,
+    # M2: RSPt calls run_impmod_ed twice per CSC iteration (once to determine the DC,
     # then 0 to solve); each call re-runs this fit. If the DC search and the selfenergy solve did
     # not end up using the SAME bath fit, the DC was determined on a different model than the one
     # it is applied to -- precisely the parity failure this branch's caching exists to prevent.

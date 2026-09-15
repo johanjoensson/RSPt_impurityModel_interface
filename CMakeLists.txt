@@ -33,7 +33,15 @@ else()
         )
 endif()
 
-add_custom_command(OUTPUT run_impurityModel.c COMMAND cp ${PROJECT_SOURCE_DIR}/src/run_impurityModel.h . COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/library_builder.py )
+# DEPENDS is load bearing: without it this rule has no prerequisites, so editing the header
+# or the builder does not regenerate run_impurityModel.c on an incremental build and the
+# change silently does not reach the shared library.
+add_custom_command(OUTPUT run_impurityModel.c
+        COMMAND cp ${PROJECT_SOURCE_DIR}/src/run_impurityModel.h .
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/library_builder.py
+        DEPENDS ${PROJECT_SOURCE_DIR}/src/run_impurityModel.h
+                ${PROJECT_SOURCE_DIR}/library_builder.py
+)
 
 if (${NODEPS})
         set(PIP_NODEPS "--no-deps")
