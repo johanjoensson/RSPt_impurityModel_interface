@@ -522,7 +522,7 @@ def _split_total_over_groups(total, nominal_occ):
 
 
 def _parse_dc_line(dc_line):
-    """Parse RSPt's 100-character double-counting line into ``(mode, target, alpha)``.
+    """Parse RSPt's 100-character double-counting line into its criterion and modifiers.
 
     Pulled out of :func:`run_impmod_ed` so the grammar can be tested without a cffi handle and a
     live RSPt call. Nothing about it changed in the move; the 100-character line itself is fixed
@@ -531,10 +531,11 @@ def _parse_dc_line(dc_line):
 
     Returns
     -------
-    (str, float or None, float, bool)
+    (str, float or None, float, bool, float or None)
         The criterion name, its numeric target (``None`` where the criterion takes none), the
-        damping factor, and whether ``gap``/``peak`` narrow their sector solves to the ground
-        multiplet.
+        damping factor, whether ``gap``/``peak`` narrow their sector solves to the ground
+        multiplet, and the PT2 admission floor for those sector solves (``None`` = the solver's
+        own default).
     """
     dc_line = dc_line.split("!")[0]
     dc_line = dc_line.split("#")[0]
@@ -581,6 +582,34 @@ def _parse_dc_line(dc_line):
             del dc_array[_i]
             break
 
+    # Optional 'de2_min X' anywhere on the line, stripped like 'alpha' and for the same reason:
+    # it modifies how a criterion solves, not which criterion runs.
+    #
+    # What it does: the Epstein-Nesbet PT2 admission floor of the charge-sector CIPSI expansions.
+    # Unset, those use `groundstate.GS_DE2_MIN` (1e-8), which buys *parity* -- the double counting
+    # determined on the same variational space as the self-energy run that consumes it -- and
+    # explicitly not accuracy. Measured on `nio_5peeled`, 1e-6 -> 1e-8 moves the gap centre 0.3 meV,
+    # i.e. ~2.7 meV in `mu` after the 1/|chi| amplification, at 4x the cost; a cap change from
+    # 2,000 to 8,000 moves it ~54 meV. Truncation drift dominates, the PT2 floor does not.
+    #
+    # Weigh that against the tolerance the search itself admits -- the SrMnO3 gap-DC record
+    # reports "dc determined to +- 5.51e-02 by the search tolerance alone", so at 1e-8 the sector
+    # energies are held ~20x finer than the answer is resolved. And the parity argument lapses
+    # wherever the sectors are cap- or memory-bound rather than PT2-converged, which is exactly
+    # the workload where the cost hurts.
+    #
+    # Loosening this is a BOUNDED approximation: the skipped weight is reported as
+    # `subthreshold_de2_mass`. Lowering the determinant cap is not -- it truncates the basis and
+    # loses spectral weight where the bath lives, which is how a self-energy turns non-causal.
+    dc_de2_min = None
+    for _i, _token in enumerate(dc_array):
+        if _token.lower() == "de2_min":
+            assert _i + 1 < len(dc_array), "'de2_min' on the double-counting line needs a value"
+            dc_de2_min = float(dc_array[_i + 1])
+            assert dc_de2_min > 0, "'de2_min' must be positive"
+            del dc_array[_i : _i + 2]
+            break
+
     # Double counting criteria:
     #   <peak_position>        -- place a spectral peak at the given energy
     #                             (E[N+1]-E[N] if positive, E[N]-E[N-1] if
@@ -604,10 +633,12 @@ def _parse_dc_line(dc_line):
     #                             B1 measures for the other schemes. The natural dc_guess for
     #                             CSC iteration 1, or a reference to check a converged
     #                             fixed_occupation_dc answer against.
-    # Any may be followed by 'alpha <value>' (parsed and removed above). 'gap' and 'peak' may
-    # also carry the bare flag 'ground_state_manifold' (likewise already parsed); every other
-    # spelling rejects it rather than silently ignoring it -- see the assertion below for why
-    # 'occ' is excluded on different grounds from the static schemes.
+    # Any may be followed by 'alpha <value>' or 'de2_min <value>' (both parsed and removed
+    # above; 'de2_min' only reaches the criteria that run charge-sector solves, so on a static
+    # scheme it parses and is simply unused). 'gap' and 'peak' may also carry the bare flag
+    # 'ground_state_manifold' (likewise already parsed); every other spelling rejects that one
+    # rather than silently ignoring it -- see the assertion below for why 'occ' is excluded on
+    # different grounds from the static schemes.
     _STATIC_SCHEMES = {"fll", "amf", "sigma_inf", "sigmainf", "nominal"}
     if len(dc_array) > 0 and dc_array[0].lower() == "gap":
         assert len(dc_array) <= 2, (
@@ -654,6 +685,11 @@ def _parse_dc_line(dc_line):
     #
     # Rejected rather than ignored either way: a flag that reports as set and does nothing is
     # the exact failure mode this file already documents for a misnamed knob.
+    assert not (dc_de2_min is not None and dc_mode in _STATIC_SCHEMES), (
+        "'de2_min' sets the PT2 admission floor of the charge-sector CIPSI solves, and the static "
+        f"double-counting schemes run no solve at all -- '{dc_mode}' would ignore it silently. "
+        "Remove it, or pick a criterion that solves ('gap', 'peak' or 'occ')."
+    )
     assert not (dc_ground_state_manifold and dc_mode not in {"gap", "peak"}), (
         "'ground_state_manifold' applies to the 'gap' and 'peak' double-counting criteria, whose "
         "residual reads only each sector's lowest energy. "
@@ -666,7 +702,7 @@ def _parse_dc_line(dc_line):
         + " Remove it from the double-counting line."
     )
 
-    return dc_mode, dc_target, dc_alpha, dc_ground_state_manifold
+    return dc_mode, dc_target, dc_alpha, dc_ground_state_manifold, dc_de2_min
 
 
 def _run_impmod_ed(
@@ -1032,7 +1068,7 @@ def _solve(
         report_continuum_reference(h_dft, hyb, hyb_fit, w, eim, tau, n0_disc, rank=rank)
 
     if dc_flag == 1:
-        dc_mode, dc_target, dc_alpha, dc_gs_manifold = _parse_dc_line(dc_line)
+        dc_mode, dc_target, dc_alpha, dc_gs_manifold, dc_de2_min = _parse_dc_line(dc_line)
 
         # The charge sector the ED criteria settle on, handed to this iteration's self-energy
         # call so it starts from the state the DC was measured against (see
@@ -1063,6 +1099,7 @@ def _solve(
                     comm=comm,
                     verbosity=verbosity,
                     ground_state_manifold=dc_gs_manifold,
+                    de2_min=dc_de2_min,
                     return_sector=True,
                 )
             elif dc_mode == "peak":
@@ -1074,6 +1111,7 @@ def _solve(
                     comm=comm,
                     verbosity=verbosity,
                     ground_state_manifold=dc_gs_manifold,
+                    de2_min=dc_de2_min,
                     return_sector=True,
                 )
             elif dc_mode == "fll":
