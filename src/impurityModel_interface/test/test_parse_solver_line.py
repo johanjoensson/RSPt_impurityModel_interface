@@ -75,7 +75,6 @@ def test_full_option_line():
     assert fit_options["weight_function"] == "gaussian"
     assert fit_options["weight"] == pytest.approx(3)
     assert fit_options["weight_w0"] == pytest.approx(-1.5)
-    assert basis.spin_flip_dj is True
     assert basis.occ_cutoff == pytest.approx(1e-4)
     assert basis.truncation_threshold == int(1e7)
     assert basis.slater_weight_min == pytest.approx(1e-8)
@@ -116,7 +115,7 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["reort"] == "full"
     assert attrs["dense_cutoff"] == 500
     assert attrs["sparse_green"] is False
-    assert attrs["spin_flip_dj"] is True
+    assert "spin_flip_dj" not in attrs
     assert attrs["chain_restrict"] is False
     assert attrs["occ_cutoff"] == pytest.approx(1e-4)
     assert attrs["dN"] == 2
@@ -128,8 +127,8 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["weight_function"] == "gaussian"
     assert attrs["fit_unocc"] is True
     assert attrs["freeze_bath_energies"] is False
-    # Every option the archive stores is present (the 18 solver-line keys).
-    assert len(attrs) == 18
+    # Every option the archive stores is present (the 17 solver-line keys; spin_flip_dj was removed).
+    assert len(attrs) == 17
 
 
 def test_unknown_argument_raises():
@@ -215,3 +214,11 @@ def test_h5_write_dataset_overwrites(tmp_path):
         # Overwriting must not raise, and must store the new data
         h5_write_dataset(g, "data", np.arange(5))
         assert np.array_equal(g["data"][...], np.arange(5))
+
+
+def test_spin_flip_dj_is_accepted_and_ignored():
+    """An existing green.inp may still carry the token; it must parse to the same options as the
+    line without it, since the option it named never had an effect and no longer exists."""
+    with_token = parse_solver_line("8 10 4 chain spin_flip_dj occ_cutoff 1e-4")
+    without = parse_solver_line("8 10 4 chain occ_cutoff 1e-4")
+    assert with_token == without

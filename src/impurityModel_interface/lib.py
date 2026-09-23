@@ -124,7 +124,8 @@ def parse_solver_line(solver_line):
                                               lingauss, quadgauss, step.
       weight X                             -- Weight function decay/steepness factor.
       weight_w0 X                          -- Center of the weight function (default 0).
-      spin_flip_dj                         -- Generate spin flipped determinants.
+      spin_flip_dj                         -- Accepted and ignored: it never had an effect on the
+                                              CIPSI solver and was removed from impurityModel.
       no_chain_restrict                    -- Disable chain occupation restrictions.
       occ_cutoff X                         -- Occupation cutoff.
       truncation_threshold N               -- Basis truncation threshold (default: None => automatically determined).
@@ -159,7 +160,6 @@ def parse_solver_line(solver_line):
         "weight_function": "unit",
         "weight": 2,
         "weight_w0": 0.0,
-        "spin_flip_dj": False,
         "bath_geometry": "peeled",
         "occ_cutoff": 1e-6,
         "excitation_budget": 4,
@@ -222,7 +222,9 @@ def parse_solver_line(solver_line):
                 options["weight"] = float(solver_array[i + 1])
                 skip_next = True
             elif arg.lower() == "spin_flip_dj":
-                options["spin_flip_dj"] = True
+                # Kept parseable so an existing green.inp still runs: the option was a no-op
+                # (only the pre-CIPSI Basis.expand read it) and impurityModel no longer has it.
+                print("spin_flip_dj on the solver line is ignored: it had no effect and has been removed.")
             elif arg.lower() == "no_chain_restrict":
                 options["chain_restrict"] = False
             elif arg.lower() == "occ_cutoff":
@@ -256,7 +258,6 @@ def parse_solver_line(solver_line):
         f"Bath geometry             |> {options['bath_geometry']}\n"
         f"Fit unoccupied states     |> {options['fit_unocc']}\n"
         f"Freeze bath energies      |> {options['freeze_bath_energies']}\n"
-        f"Generate spin fliped Djs  |> {options['spin_flip_dj']}\n"
         f"Reorthogonalizaion mode   |> {options['reort']}\n"
         f"Dense matrix size cutoff  |> {options['dense_cutoff']}\n"
         f"Fitting weight function   |> {options['weight_function']}\n"
@@ -292,7 +293,6 @@ def parse_solver_line(solver_line):
         dN=options["dN"],
         truncation_threshold=options["truncation_threshold"],
         chain_restrict=options["chain_restrict"],
-        spin_flip_dj=options["spin_flip_dj"],
         occ_cutoff=options["occ_cutoff"],
         slater_weight_min=options["slater_min"],
         excitation_budget=excitation_budget,
@@ -315,7 +315,6 @@ def solver_line_attrs(fit_options, basis, solver):
         "reort": solver.reort,
         "dense_cutoff": solver.dense_cutoff,
         "sparse_green": solver.sparse_green,
-        "spin_flip_dj": basis.spin_flip_dj,
         "chain_restrict": basis.chain_restrict,
         "occ_cutoff": basis.occ_cutoff,
         "dN": basis.dN,

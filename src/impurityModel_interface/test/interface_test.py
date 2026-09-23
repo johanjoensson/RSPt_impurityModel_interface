@@ -99,7 +99,6 @@ def test_selfenergy_against_reference():
         comm=MPI.COMM_WORLD,
         reort=options["reort"],
         dense_cutoff=int(options["dense_cutoff"]),
-        spin_flip_dj=bool(options["spin_flip_dj"]),
         chain_restrict=bool(options["chain_restrict"]),
         occ_cutoff=float(options["occ_cutoff"]),
         truncation_threshold=int(options["truncation_threshold"]),
