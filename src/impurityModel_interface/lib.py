@@ -151,6 +151,10 @@ def parse_solver_line(solver_line):
             f"{e}\n--->N0 {solver_array[0]}\n--->Nbaths {solver_array[1]}\n"
             f"--->excitation_budget {solver_array[2]}\n--->Other params {solver_array[3:]}"
         ) from e
+    if excitation_budget < 0:
+        # A negative budget would build an empty admissible window; it means "no budget".
+        print(f"excitation_budget {excitation_budget} is negative: the excitation budget is disabled.", flush=True)
+        excitation_budget = None
     options = {
         "dense_cutoff": 1000,
         "reort": "none",

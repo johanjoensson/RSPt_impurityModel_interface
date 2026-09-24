@@ -146,6 +146,15 @@ def test_excitation_budget_is_archived():
     assert attrs["n_baths"] == 3
 
 
+def test_negative_excitation_budget_disables_it(capsys):
+    """A negative budget disables the budget (with a notice) instead of building an empty window;
+    the archive then stores it as None, which impurityModel's reader reads back as disabled."""
+    _, n_baths, fit_options, basis, solver = parse_solver_line("3 3 -1 peeled")
+    assert "is negative: the excitation budget is disabled" in capsys.readouterr().out
+    assert basis.excitation_budget is None
+    assert solver_line_attrs(fit_options, basis, solver, n_baths=n_baths)["excitation_budget"] is None
+
+
 def test_settings_header_lists_every_archived_setting():
     n0, n_baths, fit_options, basis, solver = parse_solver_line(
         "3 3 8 chain full gamma 0.1 gaussian dn 2 mv 1 dense_green"
