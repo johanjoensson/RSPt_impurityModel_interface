@@ -162,7 +162,6 @@ def parse_solver_line(solver_line):
         "weight_w0": 0.0,
         "bath_geometry": "peeled",
         "occ_cutoff": 1e-6,
-        "excitation_budget": 4,
         "dN": None,
         "mv": None,
         "chain_restrict": True,
@@ -252,25 +251,6 @@ def parse_solver_line(solver_line):
         if options["dN"] is None:
             options["dN"] = 4
 
-    print(
-        f"Nominal imp. occupation   |> {nominal_occ}\n"
-        f"Bath states per imp. orb. |> {nBaths}\n"
-        f"Bath geometry             |> {options['bath_geometry']}\n"
-        f"Fit unoccupied states     |> {options['fit_unocc']}\n"
-        f"Freeze bath energies      |> {options['freeze_bath_energies']}\n"
-        f"Reorthogonalizaion mode   |> {options['reort']}\n"
-        f"Dense matrix size cutoff  |> {options['dense_cutoff']}\n"
-        f"Fitting weight function   |> {options['weight_function']}\n"
-        f"Fitting weight factor     |> {options['weight']}\n"
-        f"Fitting weight center w0  |> {options['weight_w0']}\n"
-        f"Occupation cutoff         |> {options['occ_cutoff']}\n"
-        f"dN                        |> {options['dN']}\n"
-        f"Mixed valence             |> {options['mv']}\n"
-        f"Chain occ. restrictions   |> {options['chain_restrict']}\n"
-        f"Minimal Slater weight     |> {options['slater_min']}\n"
-        f"Truncation threshold      |> {options['truncation_threshold']}\n",
-        flush=True,
-    )
     # Split the parsed tokens into: the bath-fit parameters (consumed by rspt2spectra and stored
     # as provenance) and the solver option groups impurityModel consumes. tau is external (a
     # separate run_impmod_ed argument) and is injected onto BasisOptions by the caller.
@@ -305,24 +285,81 @@ def parse_solver_line(solver_line):
     return nominal_occ, nBaths, fit_options, basis, solver
 
 
-def solver_line_attrs(fit_options, basis, solver):
+def solver_line_attrs(fit_options, basis, solver, n_baths=None):
     """Flat ``{name: value}`` record of a parsed solver line, for the HDF5 archive attrs.
 
     Reproduces the historical ``options``-dict attribute dump from the parsed option groups so
-    archived runs read back unchanged (see ``impurityModel.ed.model._read_archive_group``).
+    archived runs read back unchanged (see ``impurityModel.ed.model._read_archive_group``), and
+    records every other setting the solve depends on. ``excitation_budget`` in particular must be
+    stored: the archive reader cannot recover it otherwise and falls back to impurityModel's
+    default, so an offline rerun would silently solve a differently restricted problem.
+    ``n_baths`` (bath states per impurity orbital) is included when given.
     """
-    return {
+    attrs = {
         "reort": solver.reort,
         "dense_cutoff": solver.dense_cutoff,
         "sparse_green": solver.sparse_green,
+        "gf_method": solver.gf_method,
         "chain_restrict": basis.chain_restrict,
         "occ_cutoff": basis.occ_cutoff,
         "dN": basis.dN,
         "truncation_threshold": basis.truncation_threshold,
         "slater_min": basis.slater_weight_min,
         "mv": None if basis.mixed_valence is None else basis.mixed_valence[0],
+        "excitation_budget": basis.excitation_budget,
         **fit_options,
     }
+    if n_baths is not None:
+        attrs["n_baths"] = n_baths
+    return attrs
+
+
+# Output-header label for every key of the solver_line_attrs record, in print order.
+_SETTINGS_LABELS = (
+    ("n_baths", "Bath states per imp. orb."),
+    ("excitation_budget", "Excitation budget"),
+    ("bath_geometry", "Bath geometry"),
+    ("collapse_chains", "Collapse chains"),
+    ("fit_unocc", "Fit unoccupied states"),
+    ("freeze_bath_energies", "Freeze bath energies"),
+    ("gamma", "Fit regularization gamma"),
+    ("weight_function", "Fitting weight function"),
+    ("weight", "Fitting weight factor"),
+    ("weight_w0", "Fitting weight center w0"),
+    ("reort", "Reorthogonalizaion mode"),
+    ("dense_cutoff", "Dense matrix size cutoff"),
+    ("sparse_green", "Sparse Green's function"),
+    ("gf_method", "Green's function method"),
+    ("occ_cutoff", "Occupation cutoff"),
+    ("dN", "dN"),
+    ("mv", "Mixed valence"),
+    ("chain_restrict", "Chain occ. restrictions"),
+    ("slater_min", "Minimal Slater weight"),
+    ("truncation_threshold", "Truncation threshold"),
+)
+
+
+def format_settings_header(nominal_occ, fit_options, basis, solver, n_baths=None, tau=None, delta=None):
+    """The output-file header listing every solver setting of this run.
+
+    Built from :func:`solver_line_attrs`, the same record the HDF5 archive stores, so the header
+    and the archive cannot disagree; a key without a label in ``_SETTINGS_LABELS`` is still
+    printed under its raw name rather than dropped.
+    """
+    attrs = solver_line_attrs(fit_options, basis, solver, n_baths=n_baths)
+    rows = [("Nominal imp. occupation", nominal_occ)]
+    labelled = set()
+    for key, label in _SETTINGS_LABELS:
+        if key in attrs:
+            rows.append((label, attrs[key]))
+            labelled.add(key)
+    rows += [(key, value) for key, value in attrs.items() if key not in labelled]
+    if tau is not None:
+        rows.append(("Temperature tau", tau))
+    if delta is not None:
+        rows.append(("Real-axis broadening", delta))
+    width = max(len(label) for label, _ in rows)
+    return "\n".join(f"{label:<{width}} |> {value}" for label, value in rows) + "\n"
 
 
 def reconstruct_rotations(corr_to_spherical_in, corr_to_cf_in, n_orb, n_rot_cols, n_orb_full):
@@ -910,6 +947,12 @@ def _solve(
     _nominal_occ, bath_states_per_orbital, fit_options, basis, solver = parse_solver_line(solver_line)
     # tau is not part of the solver line; inject the external temperature onto the basis options.
     basis = replace(basis, tau=tau)
+    print(
+        format_settings_header(
+            _nominal_occ, fit_options, basis, solver, n_baths=bath_states_per_orbital, tau=tau, delta=eim
+        ),
+        flush=True,
+    )
     nominal_occ = basis.nominal_occ
     if any(n0 > n_orb for n0 in nominal_occ.values()) or any(n0 < 0 for n0 in nominal_occ.values()):
         raise RuntimeError(f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]")
@@ -1004,7 +1047,7 @@ def _solve(
         # h5py cannot store None attributes
         opt = {
             key: value if value is not None else "None"
-            for key, value in solver_line_attrs(fit_options, basis, solver).items()
+            for key, value in solver_line_attrs(fit_options, basis, solver, n_baths=bath_states_per_orbital).items()
         }
         with h5.File(hdf5_filename, "a") as f:
             if "last iteration" not in f.attrs:

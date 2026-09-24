@@ -15,6 +15,7 @@ from mpi4py import MPI  # noqa: F401
 from rspt2spectra.block_structure import build_block_structure
 
 from impurityModel_interface.lib import (
+    format_settings_header,
     get_weight_function,
     h5_write_dataset,
     parse_solver_line,
@@ -127,8 +128,41 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["weight_function"] == "gaussian"
     assert attrs["fit_unocc"] is True
     assert attrs["freeze_bath_energies"] is False
-    # Every option the archive stores is present (the 17 solver-line keys; spin_flip_dj was removed).
-    assert len(attrs) == 17
+    assert attrs["excitation_budget"] == 4
+    assert attrs["gf_method"] == "lanczos"
+    # Every option the archive stores is present (19 keys; spin_flip_dj was removed). n_baths is
+    # only added when the caller passes it.
+    assert len(attrs) == 19
+    assert "n_baths" not in attrs
+    assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
+
+
+def test_excitation_budget_is_archived():
+    """The budget is the third mandatory solver-line token; without it in the archive an offline
+    rerun silently falls back to impurityModel's default and solves a different problem."""
+    _, n_baths, fit_options, basis, solver = parse_solver_line("3 3 8 peeled")
+    attrs = solver_line_attrs(fit_options, basis, solver, n_baths=n_baths)
+    assert attrs["excitation_budget"] == 8
+    assert attrs["n_baths"] == 3
+
+
+def test_settings_header_lists_every_archived_setting():
+    n0, n_baths, fit_options, basis, solver = parse_solver_line(
+        "3 3 8 chain full gamma 0.1 gaussian dn 2 mv 1 dense_green"
+    )
+    header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths, tau=0.025, delta=0.01)
+    rows = dict(line.split(" |> ") for line in header.strip().splitlines())
+    rows = {label.strip(): value for label, value in rows.items()}
+    attrs = solver_line_attrs(fit_options, basis, solver, n_baths=n_baths)
+    # One row per archived setting, plus the nominal occupation, tau and the broadening.
+    assert len(rows) == len(attrs) + 3
+    assert rows["Nominal imp. occupation"] == "3"
+    assert rows["Excitation budget"] == "8"
+    assert rows["Bath states per imp. orb."] == "3"
+    assert rows["Fit regularization gamma"] == "0.1"
+    assert rows["Sparse Green's function"] == "False"
+    assert rows["Temperature tau"] == "0.025"
+    assert rows["Real-axis broadening"] == "0.01"
 
 
 def test_unknown_argument_raises():
