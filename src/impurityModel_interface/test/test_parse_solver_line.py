@@ -130,9 +130,10 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["freeze_bath_energies"] is False
     assert attrs["excitation_budget"] == 4
     assert attrs["gf_method"] == "lanczos"
-    # Every option the archive stores is present (19 keys; spin_flip_dj was removed). n_baths is
+    assert attrs["e_pt2_tol"] is None
+    # Every option the archive stores is present (20 keys; spin_flip_dj was removed). n_baths is
     # only added when the caller passes it.
-    assert len(attrs) == 19
+    assert len(attrs) == 20
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
@@ -265,3 +266,28 @@ def test_spin_flip_dj_is_accepted_and_ignored():
     with_token = parse_solver_line("8 10 4 chain spin_flip_dj occ_cutoff 1e-4")
     without = parse_solver_line("8 10 4 chain occ_cutoff 1e-4")
     assert with_token == without
+
+
+def test_e_pt2_is_unset_by_default_so_impurity_model_uses_its_own():
+    _, _, _, basis, _ = parse_solver_line("8 10 4 peeled")
+    assert basis.e_pt2_tol is None
+
+
+@pytest.mark.parametrize("spelling", ["e_pt2", "E_PT2", "e_pt2_tol"])
+def test_e_pt2_sets_the_ground_state_tolerance(spelling):
+    _, _, _, basis, _ = parse_solver_line(f"8 10 4 peeled {spelling} 1e-6 slater_min 0")
+    assert basis.e_pt2_tol == 1e-6
+    assert basis.slater_weight_min == 0.0, "the next token must still parse"
+
+
+@pytest.mark.parametrize("tail", ["e_pt2", "e_pt2 0", "e_pt2 -1e-8"])
+def test_e_pt2_needs_a_positive_value(tail):
+    with pytest.raises(AssertionError, match="e_pt2"):
+        parse_solver_line(f"8 10 4 peeled {tail}")
+
+
+def test_e_pt2_is_archived_and_printed():
+    n0, n_baths, fit_options, basis, solver = parse_solver_line("8 10 4 peeled e_pt2 1e-6")
+    assert solver_line_attrs(fit_options, basis, solver)["e_pt2_tol"] == 1e-6
+    header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths)
+    assert "GS residual PT2 tolerance" in header and "1e-06" in header
