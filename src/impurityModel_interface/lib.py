@@ -130,6 +130,10 @@ def parse_solver_line(solver_line):
       occ_cutoff X                         -- Occupation cutoff.
       truncation_threshold N               -- Basis truncation threshold (default: None => automatically determined).
       slater_min X                         -- Minimal Slater determinant weight.
+      e_pt2 X                              -- Residual PT2 energy the ground-state CIPSI
+                                              expansion is converged to (default: impurityModel's
+                                              GS_E_PT2_TOL, 1e-8). The double-counting search
+                                              inherits it unless its own line sets 'e_pt2'.
       dn N                                 -- Allowed impurity occupation window (+-dN).
       mv N                                 -- Mixed valence scalar, forwarded per group to
                                               impurityModel's Basis (see impurityModel docs).
@@ -171,6 +175,7 @@ def parse_solver_line(solver_line):
         "chain_restrict": True,
         "truncation_threshold": None,
         "slater_min": np.sqrt(np.finfo(float).eps),
+        "e_pt2_tol": None,
         "collapse_chains": False,
         "sparse_green": True,
     }
@@ -239,6 +244,11 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "slater_min":
                 options["slater_min"] = float(solver_array[i + 1])
                 skip_next = True
+            elif arg.lower() in {"e_pt2", "e_pt2_tol"}:
+                assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
+                options["e_pt2_tol"] = float(solver_array[i + 1])
+                assert options["e_pt2_tol"] > 0, f"'{arg}' must be positive"
+                skip_next = True
             elif arg.lower() == "dn":
                 options["dN"] = int(solver_array[i + 1])
                 skip_next = True
@@ -280,6 +290,7 @@ def parse_solver_line(solver_line):
         occ_cutoff=options["occ_cutoff"],
         slater_weight_min=options["slater_min"],
         excitation_budget=excitation_budget,
+        e_pt2_tol=options["e_pt2_tol"],
     )
     solver = SolverOptions(
         reort=options["reort"],
@@ -311,6 +322,9 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         "slater_min": basis.slater_weight_min,
         "mv": None if basis.mixed_valence is None else basis.mixed_valence[0],
         "excitation_budget": basis.excitation_budget,
+        # None = impurityModel's default (GS_E_PT2_TOL); stored as requested, so an archive read
+        # back resolves it the same way the run did.
+        "e_pt2_tol": basis.e_pt2_tol,
         **fit_options,
     }
     if n_baths is not None:
@@ -339,6 +353,7 @@ _SETTINGS_LABELS = (
     ("mv", "Mixed valence"),
     ("chain_restrict", "Chain occ. restrictions"),
     ("slater_min", "Minimal Slater weight"),
+    ("e_pt2_tol", "GS residual PT2 tolerance"),
     ("truncation_threshold", "Truncation threshold"),
 )
 
@@ -571,11 +586,11 @@ def _parse_dc_line(dc_line):
 
     Returns
     -------
-    (str, float or None, float, bool, float or None)
+    (str, float or None, float, bool, float or None, float or None)
         The criterion name, its numeric target (``None`` where the criterion takes none), the
         damping factor, whether ``gap``/``peak`` narrow their sector solves to the ground
-        multiplet, and the PT2 admission floor for those sector solves (``None`` = the solver's
-        own default).
+        multiplet, the PT2 admission floor for those sector solves, and the residual PT2 energy
+        they converge to (``None`` for either = the solver's own default).
     """
     dc_line = dc_line.split("!")[0]
     dc_line = dc_line.split("#")[0]
@@ -650,6 +665,27 @@ def _parse_dc_line(dc_line):
             del dc_array[_i : _i + 2]
             break
 
+    # Optional 'e_pt2 X' (or 'e_pt2_tol X') anywhere on the line, stripped like 'de2_min'.
+    #
+    # What it does: the residual Epstein-Nesbet PT2 energy the charge-sector CIPSI expansions are
+    # converged to -- the *summed* PT2 contribution of every determinant left out, which is what
+    # the energy error follows (impurityModel's doc/plans/cipsi_pt2_convergence.md). This, not
+    # 'de2_min', is the accuracy control: 'de2_min' bounds each refused determinant, not their
+    # sum, and at 1e-8 alone left the SrMnO3 ground state 5.0e-5 above its converged energy.
+    #
+    # Unset, the sector solves inherit the solver line's own 'e_pt2' (else 1e-8), so the double
+    # counting is measured on a space converged as far as the self-energy run's. Loosen it (e.g.
+    # 1e-5) when the search is the cost -- on SrMnO3 converging the N-1 sector to 1e-8 is expected
+    # to hit the memory guard. A solve that stops short of it warns with its residual.
+    dc_e_pt2_tol = None
+    for _i, _token in enumerate(dc_array):
+        if _token.lower() in {"e_pt2", "e_pt2_tol"}:
+            assert _i + 1 < len(dc_array), f"'{_token}' on the double-counting line needs a value"
+            dc_e_pt2_tol = float(dc_array[_i + 1])
+            assert dc_e_pt2_tol > 0, f"'{_token}' must be positive"
+            del dc_array[_i : _i + 2]
+            break
+
     # Double counting criteria:
     #   <peak_position>        -- place a spectral peak at the given energy
     #                             (E[N+1]-E[N] if positive, E[N]-E[N-1] if
@@ -676,9 +712,9 @@ def _parse_dc_line(dc_line):
     # Any may be followed by 'alpha <value>' or 'de2_min <value>' (both parsed and removed
     # above; 'de2_min' only reaches the criteria that run charge-sector solves, so on a static
     # scheme it parses and is simply unused). 'gap' and 'peak' may also carry the bare flag
-    # 'ground_state_manifold' (likewise already parsed); every other spelling rejects that one
-    # rather than silently ignoring it -- see the assertion below for why 'occ' is excluded on
-    # different grounds from the static schemes.
+    # 'ground_state_manifold' and 'e_pt2 <value>' (likewise already parsed); every other
+    # spelling rejects them rather than silently ignoring them -- see the assertions below for
+    # why 'occ' is excluded on different grounds from the static schemes.
     _STATIC_SCHEMES = {"fll", "amf", "sigma_inf", "sigmainf", "nominal"}
     if len(dc_array) > 0 and dc_array[0].lower() == "gap":
         assert len(dc_array) <= 2, (
@@ -741,8 +777,22 @@ def _parse_dc_line(dc_line):
         )
         + " Remove it from the double-counting line."
     )
+    # 'occ' is excluded on the parity ground: it solves on the production ground-state path, so
+    # it converges to the solver line's 'e_pt2' and only to that -- the same tolerance the
+    # self-energy run's ground state uses. Rejected, not ignored, like the flag above.
+    assert not (dc_e_pt2_tol is not None and dc_mode not in {"gap", "peak"}), (
+        "'e_pt2' on the double-counting line sets the convergence of the 'gap' and 'peak' "
+        "criteria's charge-sector solves. "
+        + (
+            "'occ' solves on the production ground-state path and converges to the solver line's "
+            "'e_pt2', so set it there."
+            if dc_mode == "occupation"
+            else f"The static scheme '{dc_mode}' runs no solve at all."
+        )
+        + " Remove it from the double-counting line."
+    )
 
-    return dc_mode, dc_target, dc_alpha, dc_ground_state_manifold, dc_de2_min
+    return dc_mode, dc_target, dc_alpha, dc_ground_state_manifold, dc_de2_min, dc_e_pt2_tol
 
 
 def _run_impmod_ed(
@@ -1114,7 +1164,7 @@ def _solve(
         report_continuum_reference(h_dft, hyb, hyb_fit, w, eim, tau, n0_disc, rank=rank)
 
     if dc_flag == 1:
-        dc_mode, dc_target, dc_alpha, dc_gs_manifold, dc_de2_min = _parse_dc_line(dc_line)
+        dc_mode, dc_target, dc_alpha, dc_gs_manifold, dc_de2_min, dc_e_pt2_tol = _parse_dc_line(dc_line)
 
         # The charge sector the ED criteria settle on, handed to this iteration's self-energy
         # call so it starts from the state the DC was measured against (see
@@ -1146,6 +1196,7 @@ def _solve(
                     verbosity=verbosity,
                     ground_state_manifold=dc_gs_manifold,
                     de2_min=dc_de2_min,
+                    e_pt2_tol=dc_e_pt2_tol,
                     return_sector=True,
                 )
             elif dc_mode == "peak":
@@ -1158,6 +1209,7 @@ def _solve(
                     verbosity=verbosity,
                     ground_state_manifold=dc_gs_manifold,
                     de2_min=dc_de2_min,
+                    e_pt2_tol=dc_e_pt2_tol,
                     return_sector=True,
                 )
             elif dc_mode == "fll":
