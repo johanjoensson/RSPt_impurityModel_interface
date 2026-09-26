@@ -175,6 +175,31 @@ def test_settings_header_lists_every_archived_setting():
     assert rows["Real-axis broadening"] == "0.01"
 
 
+@pytest.mark.parametrize(
+    "written, expected",
+    [("auto", None), ("unlimited", float("inf")), ("inf", float("inf")), ("2e6", 2_000_000), ("5000", 5000)],
+)
+def test_truncation_threshold_takes_the_shared_vocabulary(written, expected):
+    """auto | unlimited (inf) | a positive integer, as on the CLI and in TOML. `inf` used to raise
+    OverflowError here and `auto` a ValueError."""
+    _, _, _, basis, _ = parse_solver_line(f"3 3 8 chain full truncation_threshold {written}")
+    assert basis.truncation_threshold == expected
+
+
+@pytest.mark.parametrize("written", ["0", "-10", "1.5", "lots"])
+def test_truncation_threshold_rejects_nonsense(written):
+    with pytest.raises(ValueError):
+        parse_solver_line(f"3 3 8 chain full truncation_threshold {written}")
+
+
+@pytest.mark.parametrize("written, shown", [("auto", "auto"), ("unlimited", "unlimited"), ("2000", "2000")])
+def test_settings_header_names_the_cap_in_the_solver_line_words(written, shown):
+    n0, n_baths, fit_options, basis, solver = parse_solver_line(f"3 3 8 chain full truncation_threshold {written}")
+    header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths)
+    rows = {label.strip(): value for label, value in (line.split(" |> ") for line in header.strip().splitlines())}
+    assert rows["Truncation threshold"] == shown
+
+
 def test_unknown_argument_raises():
     with pytest.raises(RuntimeError, match="Unknown solver parameter"):
         parse_solver_line("8 10 4 bogus_option")

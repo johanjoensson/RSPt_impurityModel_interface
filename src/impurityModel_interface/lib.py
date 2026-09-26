@@ -86,6 +86,7 @@ try:
         fll_dc,
         load_environment,
         nominal_dc,
+        parse_truncation_threshold,
         report_continuum_reference,
         save_Greens_function,
         sigma_inf_dc,
@@ -128,7 +129,11 @@ def parse_solver_line(solver_line):
                                               CIPSI solver and was removed from impurityModel.
       no_chain_restrict                    -- Disable chain occupation restrictions.
       occ_cutoff X                         -- Occupation cutoff.
-      truncation_threshold N               -- Basis truncation threshold (default: None => automatically determined).
+      truncation_threshold N               -- Determinant cap per basis: auto (default; sized from memory,
+                                              separately for the ground state and the Green's-function
+                                              units, may be held lower at run time), unlimited (alias
+                                              inf; no cap, memory guard still active), or a positive
+                                              integer such as 2e6 (final: never lowered, only warned about).
       slater_min X                         -- Minimal Slater determinant weight.
       e_pt2 X                              -- Residual PT2 energy the ground-state CIPSI
                                               expansion is converged to (default: impurityModel's
@@ -239,7 +244,8 @@ def parse_solver_line(solver_line):
                 options["occ_cutoff"] = float(solver_array[i + 1])
                 skip_next = True
             elif arg.lower() == "truncation_threshold":
-                options["truncation_threshold"] = int(float(solver_array[i + 1]))
+                # The one vocabulary shared with the CLI and TOML input: auto | unlimited/inf | N.
+                options["truncation_threshold"] = parse_truncation_threshold(solver_array[i + 1])
                 skip_next = True
             elif arg.lower() == "slater_min":
                 options["slater_min"] = float(solver_array[i + 1])
@@ -366,6 +372,10 @@ def format_settings_header(nominal_occ, fit_options, basis, solver, n_baths=None
     printed under its raw name rather than dropped.
     """
     attrs = solver_line_attrs(fit_options, basis, solver, n_baths=n_baths)
+    if "truncation_threshold" in attrs:
+        # Printed in the words the solver line takes, not as Python's None/inf.
+        cap = attrs["truncation_threshold"]
+        attrs["truncation_threshold"] = "auto" if cap is None else ("unlimited" if not cap < float("inf") else cap)
     rows = [("Nominal imp. occupation", nominal_occ)]
     labelled = set()
     for key, label in _SETTINGS_LABELS:
