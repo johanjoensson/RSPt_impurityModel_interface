@@ -360,7 +360,7 @@ _SETTINGS_LABELS = (
     ("chain_restrict", "Chain occ. restrictions"),
     ("slater_min", "Minimal Slater weight"),
     ("e_pt2_tol", "GS residual PT2 tolerance"),
-    ("truncation_threshold", "Truncation threshold"),
+    ("truncation_threshold", "Determinant cap (truncation_threshold)"),
 )
 
 
@@ -375,7 +375,9 @@ def format_settings_header(nominal_occ, fit_options, basis, solver, n_baths=None
     if "truncation_threshold" in attrs:
         # Printed in the words the solver line takes, not as Python's None/inf.
         cap = attrs["truncation_threshold"]
-        attrs["truncation_threshold"] = "auto" if cap is None else ("unlimited" if not cap < float("inf") else cap)
+        attrs["truncation_threshold"] = (
+            "auto" if cap is None else ("unlimited" if not cap < float("inf") else f"{int(cap):,} (final)")
+        )
     rows = [("Nominal imp. occupation", nominal_occ)]
     labelled = set()
     for key, label in _SETTINGS_LABELS:

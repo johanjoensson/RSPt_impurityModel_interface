@@ -192,12 +192,14 @@ def test_truncation_threshold_rejects_nonsense(written):
         parse_solver_line(f"3 3 8 chain full truncation_threshold {written}")
 
 
-@pytest.mark.parametrize("written, shown", [("auto", "auto"), ("unlimited", "unlimited"), ("2000", "2000")])
+@pytest.mark.parametrize(
+    "written, shown", [("auto", "auto"), ("unlimited", "unlimited"), ("2000", "2,000 (final)")]
+)
 def test_settings_header_names_the_cap_in_the_solver_line_words(written, shown):
     n0, n_baths, fit_options, basis, solver = parse_solver_line(f"3 3 8 chain full truncation_threshold {written}")
     header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths)
     rows = {label.strip(): value for label, value in (line.split(" |> ") for line in header.strip().splitlines())}
-    assert rows["Truncation threshold"] == shown
+    assert rows["Determinant cap (truncation_threshold)"] == shown
 
 
 def test_unknown_argument_raises():
