@@ -143,6 +143,19 @@ def parse_solver_line(solver_line):
       mv N                                 -- Mixed valence scalar, forwarded per group to
                                               impurityModel's Basis (see impurityModel docs).
       dense_green                          -- Use the dense block-Lanczos Green's function path.
+      gf_method lanczos|bicgstab           -- Green's function kernel (default lanczos): one block-Lanczos
+                                              recurrence per work unit serving the whole frequency mesh, or
+                                              one linear solve per frequency point on its own rebuilt basis.
+                                              Retired kernels are refused with the reason.
+      gf_admission auto|all|outer          -- Basis growth of each per-frequency solve (needs gf_method
+                                              bicgstab). all admits every determinant the solver produces.
+                                              outer solves on a frozen basis, scores the residual outside it,
+                                              admits only what clears gf_admit_tol and records a measured
+                                              error bound in the output. auto (default) leaves it to the
+                                              GF_BICGSTAB_ADMISSION environment knob, else all.
+      gf_admit_tol X                       -- Admission threshold of 'gf_admission outer', relative to the
+                                              seed norm (default 1e-4). Smaller admits more and is more
+                                              accurate; the reported error bound says what was left out.
     """
     # Remove comments from the solver line
     solver_line = solver_line.split("!")[0]
@@ -183,6 +196,9 @@ def parse_solver_line(solver_line):
         "e_pt2_tol": None,
         "collapse_chains": False,
         "sparse_green": True,
+        "gf_method": "lanczos",
+        "gf_admission": None,
+        "gf_admit_tol": None,
     }
     if len(solver_array) > 3:
         skip_next = False
@@ -263,6 +279,18 @@ def parse_solver_line(solver_line):
                 skip_next = True
             elif arg.lower() == "dense_green":
                 options["sparse_green"] = False
+            elif arg.lower() in {"gf_method", "gf_admission", "gf_admit_tol"}:
+                assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
+                value = solver_array[i + 1].lower()
+                if arg.lower() == "gf_method":
+                    options["gf_method"] = value
+                elif arg.lower() == "gf_admission":
+                    # "auto" is the TOML spelling of "not specified"; both mean the environment decides.
+                    options["gf_admission"] = None if value == "auto" else value
+                else:
+                    options["gf_admit_tol"] = float(value)
+                    assert options["gf_admit_tol"] > 0, f"'{arg}' must be positive"
+                skip_next = True
             else:
                 raise RuntimeError(f"Unknown solver parameter {arg}.\n--->Other solver params {solver_array[2:]}")
     if options["bath_geometry"] == "star":
@@ -298,11 +326,19 @@ def parse_solver_line(solver_line):
         excitation_budget=excitation_budget,
         e_pt2_tol=options["e_pt2_tol"],
     )
-    solver = SolverOptions(
-        reort=options["reort"],
-        dense_cutoff=options["dense_cutoff"],
-        sparse_green=options["sparse_green"],
-    )
+    try:
+        solver = SolverOptions(
+            reort=options["reort"],
+            dense_cutoff=options["dense_cutoff"],
+            sparse_green=options["sparse_green"],
+            gf_method=options["gf_method"],
+            gf_admission=options["gf_admission"],
+            gf_admit_tol=options["gf_admit_tol"],
+        )
+    except ValueError as error:
+        # The solver refuses a combination it would otherwise ignore (outer admission on the Lanczos
+        # kernel) or a kernel it does not have: say it where the user wrote it, before any solve.
+        raise RuntimeError(f"Invalid Green's function setting on the solver line: {error}") from error
     return nominal_occ, nBaths, fit_options, basis, solver
 
 
@@ -321,6 +357,10 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         "dense_cutoff": solver.dense_cutoff,
         "sparse_green": solver.sparse_green,
         "gf_method": solver.gf_method,
+        # None = not specified (the environment decides, else "all" / the default threshold); stored
+        # as given, so an archive read back resolves them the way the run did.
+        "gf_admission": solver.gf_admission,
+        "gf_admit_tol": solver.gf_admit_tol,
         "chain_restrict": basis.chain_restrict,
         "occ_cutoff": basis.occ_cutoff,
         "dN": basis.dN,
@@ -354,6 +394,8 @@ _SETTINGS_LABELS = (
     ("dense_cutoff", "Dense matrix size cutoff"),
     ("sparse_green", "Sparse Green's function"),
     ("gf_method", "Green's function method"),
+    ("gf_admission", "GF basis admission"),
+    ("gf_admit_tol", "GF admission threshold"),
     ("occ_cutoff", "Occupation cutoff"),
     ("dN", "dN"),
     ("mv", "Mixed valence"),
@@ -378,6 +420,11 @@ def format_settings_header(nominal_occ, fit_options, basis, solver, n_baths=None
         attrs["truncation_threshold"] = (
             "auto" if cap is None else ("unlimited" if not cap < float("inf") else f"{int(cap):,} (final)")
         )
+    # Unspecified policy/threshold are printed in the words the solver line takes, not as Python's None.
+    if attrs.get("gf_admission", "") is None:
+        attrs["gf_admission"] = "auto"
+    if attrs.get("gf_admit_tol", "") is None:
+        attrs["gf_admit_tol"] = "default" if attrs.get("gf_admission") == "outer" else "n/a"
     rows = [("Nominal imp. occupation", nominal_occ)]
     labelled = set()
     for key, label in _SETTINGS_LABELS:

@@ -131,9 +131,10 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["excitation_budget"] == 4
     assert attrs["gf_method"] == "lanczos"
     assert attrs["e_pt2_tol"] is None
-    # Every option the archive stores is present (20 keys; spin_flip_dj was removed). n_baths is
+    assert attrs["gf_admission"] is None and attrs["gf_admit_tol"] is None
+    # Every option the archive stores is present (22 keys; spin_flip_dj was removed). n_baths is
     # only added when the caller passes it.
-    assert len(attrs) == 20
+    assert len(attrs) == 22
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
@@ -318,3 +319,82 @@ def test_e_pt2_is_archived_and_printed():
     assert solver_line_attrs(fit_options, basis, solver)["e_pt2_tol"] == 1e-6
     header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths)
     assert "GS residual PT2 tolerance" in header and "1e-06" in header
+
+
+# --- the Green's-function kernel and its basis-growth policy ------------------------------------------
+
+
+def test_the_kernel_and_policy_are_unspecified_by_default_so_existing_lines_run_as_before():
+    _, _, _, _, solver = parse_solver_line("8 10 4 peeled")
+    assert (solver.gf_method, solver.gf_admission, solver.gf_admit_tol) == ("lanczos", None, None)
+
+
+def test_gf_method_selects_the_kernel():
+    _, _, _, _, solver = parse_solver_line("8 10 4 peeled gf_method bicgstab")
+    assert solver.gf_method == "bicgstab"
+
+
+def test_outer_admission_with_a_threshold_is_parsed_and_the_next_token_still_parses():
+    _, _, _, basis, solver = parse_solver_line(
+        "8 10 4 peeled gf_method bicgstab gf_admission outer gf_admit_tol 1e-5 slater_min 0"
+    )
+    assert (solver.gf_method, solver.gf_admission, solver.gf_admit_tol) == ("bicgstab", "outer", 1e-5)
+    assert basis.slater_weight_min == 0.0, "the token after gf_admit_tol must still parse"
+
+
+@pytest.mark.parametrize("spelling", ["GF_ADMISSION OUTER", "gf_admission Outer", "gf_admission outer"])
+def test_the_keywords_and_values_are_case_insensitive(spelling):
+    _, _, _, _, solver = parse_solver_line(f"8 10 4 peeled GF_METHOD BiCGStab {spelling}")
+    assert (solver.gf_method, solver.gf_admission) == ("bicgstab", "outer")
+
+
+def test_auto_admission_means_not_specified():
+    _, _, _, _, solver = parse_solver_line("8 10 4 peeled gf_method bicgstab gf_admission auto")
+    assert solver.gf_admission is None
+
+
+@pytest.mark.parametrize(
+    "tail, message",
+    [
+        ("gf_admission outer", "needs gf_method='bicgstab'"),
+        ("gf_method bicgstab gf_admit_tol 1e-4", "only applies to gf_admission='outer'"),
+        ("gf_method bicgstab gf_admission sometimes", "expected one of"),
+        ("gf_method nope", "gf_method"),
+        ("gf_method cipsi", "retired"),
+    ],
+    ids=["outer on lanczos", "threshold without policy", "unknown policy", "unknown kernel", "retired kernel"],
+)
+def test_a_contradictory_or_unknown_setting_is_refused_at_parse_time(tail, message):
+    """Before any solve: a mistake on the line must not surface minutes into a run."""
+    with pytest.raises(RuntimeError, match=message):
+        parse_solver_line(f"8 10 4 peeled {tail}")
+
+
+@pytest.mark.parametrize("tail", ["gf_method", "gf_admission", "gf_admit_tol"])
+def test_a_missing_value_is_refused(tail):
+    with pytest.raises(AssertionError, match=tail):
+        parse_solver_line(f"8 10 4 peeled {tail}")
+
+
+@pytest.mark.parametrize("value", ["0", "-1e-4"])
+def test_the_threshold_must_be_positive(value):
+    with pytest.raises(AssertionError, match="gf_admit_tol"):
+        parse_solver_line(f"8 10 4 peeled gf_method bicgstab gf_admission outer gf_admit_tol {value}")
+
+
+def test_the_policy_is_archived_and_printed_in_the_words_of_the_line():
+    n0, n_baths, fit_options, basis, solver = parse_solver_line(
+        "8 10 4 peeled gf_method bicgstab gf_admission outer gf_admit_tol 1e-5"
+    )
+    attrs = solver_line_attrs(fit_options, basis, solver)
+    assert (attrs["gf_method"], attrs["gf_admission"], attrs["gf_admit_tol"]) == ("bicgstab", "outer", 1e-5)
+    rows = dict(line.split(" |> ") for line in format_settings_header(n0, fit_options, basis, solver).splitlines())
+    rows = {label.strip(): value for label, value in rows.items()}
+    assert rows["GF basis admission"] == "outer" and rows["GF admission threshold"] == "1e-05"
+
+
+def test_the_header_prints_an_unspecified_policy_as_auto_not_as_none():
+    n0, _, fit_options, basis, solver = parse_solver_line("8 10 4 peeled")
+    rows = dict(line.split(" |> ") for line in format_settings_header(n0, fit_options, basis, solver).splitlines())
+    rows = {label.strip(): value for label, value in rows.items()}
+    assert rows["GF basis admission"] == "auto" and rows["GF admission threshold"] == "n/a"
