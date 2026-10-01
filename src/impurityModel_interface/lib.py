@@ -1752,17 +1752,9 @@ def fit_hyb_star(
                 "model.",
                 flush=True,
             )
-        elif stored_fingerprint is not None:
-            print(
-                f"WARNING: a bath fit is already stored for {label!r} {iteration_label}, but "
-                "its hybridization fingerprint differs from this call's -- the DC search and "
-                "the selfenergy solve are NOT using the same bath model this iteration. "
-                "Refitting.",
-                flush=True,
-            )
         else:
             print(
-                f"Bath fit computed fresh for {label!r} {iteration_label} (no fit stored yet " "this iteration).",
+                f"Bath fit computed fresh for {label!r} {iteration_label} (no fit stored yet this iteration).",
                 flush=True,
             )
     if comm is not None:
