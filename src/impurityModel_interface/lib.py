@@ -1596,7 +1596,7 @@ def get_ed_h0(
     # rspt2spectra block-diagonalizes the hybridization function, rotates the
     # local hamiltonian into the same (fitting) basis and builds the block
     # partition from the union of both connectivities.
-    Q, phase_hyb, H_local_Q, block_structure = prepare_hyb_fit(hyb, H_dft, tol=1e-6, verbose=verbose)
+    Q, phase_hyb, H_local_Q, block_structure = prepare_hyb_fit(hyb, H_dft, tol=1e-6, verbose=verbose, w=w)
 
     # Fingerprint of the hybridization function, used to decide whether a
     # stored bath fit can be reused (identical hybridization) or the fit has
