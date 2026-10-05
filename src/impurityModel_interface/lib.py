@@ -156,6 +156,17 @@ def parse_solver_line(solver_line):
       gf_admit_tol X                       -- Admission threshold of 'gf_admission outer', relative to the
                                               seed norm (default 1e-4). Smaller admits more and is more
                                               accurate; the reported error bound says what was left out.
+      gf_tol X                             -- Block-Lanczos Green's function convergence tolerance (relative
+                                              change of G) on both frequency axes (default: impurityModel's
+                                              GF_TOL knob, else max(slater_min^2, 1e-9)). gf_method lanczos only.
+      gf_real_tol X                        -- The same tolerance on the real-frequency axis only (default: the
+                                              gf_tol value). RSPt's DMFT loop is driven by the Matsubara
+                                              self-energy, so a looser real-axis tolerance (e.g. 1e-6)
+                                              shortens every Green's function unit without changing it.
+      gf_min_weight X                      -- Drop thermal states whose normalised Boltzmann weight is
+                                              below X from the Green's function and self-energy (whole
+                                              degenerate manifolds; never the ground one). Default: keep
+                                              every state of the energy window -tau*ln(1e-4).
     """
     # Remove comments from the solver line
     solver_line = solver_line.split("!")[0]
@@ -199,6 +210,9 @@ def parse_solver_line(solver_line):
         "gf_method": "lanczos",
         "gf_admission": None,
         "gf_admit_tol": None,
+        "gf_tol": None,
+        "gf_real_tol": None,
+        "gf_min_weight": None,
     }
     if len(solver_array) > 3:
         skip_next = False
@@ -291,6 +305,11 @@ def parse_solver_line(solver_line):
                     options["gf_admit_tol"] = float(value)
                     assert options["gf_admit_tol"] > 0, f"'{arg}' must be positive"
                 skip_next = True
+            elif arg.lower() in {"gf_tol", "gf_real_tol", "gf_min_weight"}:
+                assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
+                # Range and kernel checks live in SolverOptions, reported below where the line is parsed.
+                options[arg.lower()] = float(solver_array[i + 1])
+                skip_next = True
             else:
                 raise RuntimeError(f"Unknown solver parameter {arg}.\n--->Other solver params {solver_array[2:]}")
     if options["bath_geometry"] == "star":
@@ -334,6 +353,9 @@ def parse_solver_line(solver_line):
             gf_method=options["gf_method"],
             gf_admission=options["gf_admission"],
             gf_admit_tol=options["gf_admit_tol"],
+            gf_tol=options["gf_tol"],
+            gf_real_tol=options["gf_real_tol"],
+            gf_min_weight=options["gf_min_weight"],
         )
     except ValueError as error:
         # The solver refuses a combination it would otherwise ignore (outer admission on the Lanczos
@@ -361,6 +383,11 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         # as given, so an archive read back resolves them the way the run did.
         "gf_admission": solver.gf_admission,
         "gf_admit_tol": solver.gf_admit_tol,
+        # None = impurityModel's default (GF_TOL / GF_REAL_TOL knobs, else max(slater_min^2, 1e-9)).
+        "gf_tol": solver.gf_tol,
+        "gf_real_tol": solver.gf_real_tol,
+        # None = every state of the eigensolver's thermal window.
+        "gf_min_weight": solver.gf_min_weight,
         "chain_restrict": basis.chain_restrict,
         "occ_cutoff": basis.occ_cutoff,
         "dN": basis.dN,
@@ -396,6 +423,9 @@ _SETTINGS_LABELS = (
     ("gf_method", "Green's function method"),
     ("gf_admission", "GF basis admission"),
     ("gf_admit_tol", "GF admission threshold"),
+    ("gf_tol", "GF convergence tolerance"),
+    ("gf_real_tol", "GF real-axis tolerance"),
+    ("gf_min_weight", "GF minimal thermal weight"),
     ("occ_cutoff", "Occupation cutoff"),
     ("dN", "dN"),
     ("mv", "Mixed valence"),
@@ -425,6 +455,11 @@ def format_settings_header(nominal_occ, fit_options, basis, solver, n_baths=None
         attrs["gf_admission"] = "auto"
     if attrs.get("gf_admit_tol", "") is None:
         attrs["gf_admit_tol"] = "default" if attrs.get("gf_admission") == "outer" else "n/a"
+    for key in ("gf_tol", "gf_real_tol"):
+        if attrs.get(key, "") is None:
+            attrs[key] = "default"
+    if attrs.get("gf_min_weight", "") is None:
+        attrs["gf_min_weight"] = "off"
     rows = [("Nominal imp. occupation", nominal_occ)]
     labelled = set()
     for key, label in _SETTINGS_LABELS:

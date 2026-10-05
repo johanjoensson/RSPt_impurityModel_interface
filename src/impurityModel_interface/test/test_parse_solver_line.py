@@ -132,9 +132,10 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["gf_method"] == "lanczos"
     assert attrs["e_pt2_tol"] is None
     assert attrs["gf_admission"] is None and attrs["gf_admit_tol"] is None
-    # Every option the archive stores is present (22 keys; spin_flip_dj was removed). n_baths is
+    assert attrs["gf_tol"] is None and attrs["gf_real_tol"] is None and attrs["gf_min_weight"] is None
+    # Every option the archive stores is present (25 keys; spin_flip_dj was removed). n_baths is
     # only added when the caller passes it.
-    assert len(attrs) == 22
+    assert len(attrs) == 25
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
@@ -398,3 +399,38 @@ def test_the_header_prints_an_unspecified_policy_as_auto_not_as_none():
     rows = dict(line.split(" |> ") for line in format_settings_header(n0, fit_options, basis, solver).splitlines())
     rows = {label.strip(): value for label, value in rows.items()}
     assert rows["GF basis admission"] == "auto" and rows["GF admission threshold"] == "n/a"
+
+
+def test_the_gf_tolerances_parse_and_are_archived():
+    _, _, fit_options, basis, solver = parse_solver_line("3 4 8 linked_chain gf_tol 1e-8 gf_real_tol 1e-5 slater_min 0")
+    assert (solver.gf_tol, solver.gf_real_tol) == (1e-8, 1e-5)
+    assert basis.slater_weight_min == 0.0, "the token after gf_real_tol must still parse"
+    attrs = solver_line_attrs(fit_options, basis, solver)
+    assert (attrs["gf_tol"], attrs["gf_real_tol"]) == (1e-8, 1e-5)
+
+
+@pytest.mark.parametrize(
+    "tail,match",
+    [
+        ("gf_real_tol 0", "must lie in"),
+        ("gf_tol 2", "must lie in"),
+        ("gf_method bicgstab gf_tol 1e-6", "block-Lanczos"),
+    ],
+)
+def test_a_bad_gf_tolerance_is_refused_at_parse_time(tail, match):
+    with pytest.raises(RuntimeError, match=match):
+        parse_solver_line(f"3 4 8 linked_chain {tail}")
+
+
+def test_a_gf_tolerance_without_a_value_is_refused():
+    with pytest.raises(AssertionError, match="gf_real_tol"):
+        parse_solver_line("3 4 8 linked_chain gf_real_tol")
+
+
+def test_the_thermal_weight_cutoff_parses_and_is_archived():
+    _, _, fit_options, basis, solver = parse_solver_line("3 4 8 linked_chain gf_min_weight 1e-3 e_pt2 1e-6")
+    assert solver.gf_min_weight == 1e-3
+    assert basis.e_pt2_tol == 1e-6, "the token after gf_min_weight must still parse"
+    assert solver_line_attrs(fit_options, basis, solver)["gf_min_weight"] == 1e-3
+    with pytest.raises(RuntimeError, match="gf_min_weight must lie in"):
+        parse_solver_line("3 4 8 linked_chain gf_min_weight 1")
