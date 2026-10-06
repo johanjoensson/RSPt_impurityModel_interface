@@ -160,9 +160,10 @@ def parse_solver_line(solver_line):
                                               change of G) on both frequency axes (default: impurityModel's
                                               GF_TOL knob, else max(slater_min^2, 1e-9)). gf_method lanczos only.
       gf_real_tol X                        -- The same tolerance on the real-frequency axis only (default: the
-                                              gf_tol value). RSPt's DMFT loop is driven by the Matsubara
-                                              self-energy, so a looser real-axis tolerance (e.g. 1e-6)
-                                              shortens every Green's function unit without changing it.
+                                              gf_tol value). A looser real-axis tolerance (e.g. 1e-6)
+                                              shortens every Green's function unit and leaves the Matsubara
+                                              self-energy unchanged. Do not loosen it far: RSPt builds the
+                                              next bath fit from the real-axis self-energy.
       gf_min_weight X                      -- Drop thermal states whose normalised Boltzmann weight is
                                               below X from the Green's function and self-energy (whole
                                               degenerate manifolds; never the ground one). Default: keep
