@@ -54,3 +54,11 @@ To build the threaded version of `impurityModel`, configure with
 `cmake -B build -S . -DPARALLEL_IMPURITYMODEL=ON`. This sets
 `IMPURITYMODEL_PARALLEL=1` when `impurityModel` is built during
 `cmake --build build`.
+
+`impurityModel` is built in its optimized `release` mode by default. Choose the
+mode with `-DIMPURITYMODEL_BUILD=release|debug|safe` (passed on as the
+`IMPURITYMODEL_BUILD` environment variable); `-DCMAKE_BUILD_TYPE=Debug` makes
+`debug` the default. Use `safe` for builds shared across heterogeneous cluster
+nodes, since `release` compiles with `-march=native`. The value is cached, so
+to change it in an existing build directory pass `-DIMPURITYMODEL_BUILD=...`
+explicitly.

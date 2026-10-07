@@ -8,6 +8,25 @@ option(NODEPS "Do not install requirements (impurityModel)" OFF)
 option(EDITABLE_DEPS "Install editable dependencies (impurityModel)" OFF)
 option(PARALLEL_IMPURITYMODEL "Build the threaded version of impurityModel (IMPURITYMODEL_PARALLEL=1)" OFF)
 
+# Default to an optimized build of the interface library itself.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# impurityModel's setup.py reads IMPURITYMODEL_BUILD (release | debug | safe). Set it
+# explicitly so the mode does not depend on whatever the calling shell happens to export.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(_IMPURITYMODEL_BUILD_DEFAULT debug)
+else()
+        set(_IMPURITYMODEL_BUILD_DEFAULT release)
+endif()
+set(IMPURITYMODEL_BUILD ${_IMPURITYMODEL_BUILD_DEFAULT} CACHE STRING "impurityModel build mode: release, debug or safe")
+set_property(CACHE IMPURITYMODEL_BUILD PROPERTY STRINGS release debug safe)
+if(NOT IMPURITYMODEL_BUILD MATCHES "^(release|debug|safe)$")
+        message(FATAL_ERROR "IMPURITYMODEL_BUILD must be release, debug or safe (got '${IMPURITYMODEL_BUILD}')")
+endif()
+message(STATUS "impurityModel build mode: ${IMPURITYMODEL_BUILD}")
+
 set(Python3_FIND_VIRTUALENV FIRST)
 find_package(Python3 3.2 COMPONENTS Interpreter Development.Embed  REQUIRED)
 
@@ -62,8 +81,18 @@ else()
 endif()
 
 
+# Forward CFLAGS/CXXFLAGS only when set: setuptools *replaces* Python's own flags with
+# them, so an empty value would silently drop e.g. -DNDEBUG from the extension builds.
+set(COMPILER_FLAGS_ENV)
+if(CMAKE_C_FLAGS)
+        list(APPEND COMPILER_FLAGS_ENV "CFLAGS=${CMAKE_C_FLAGS}")
+endif()
+if(CMAKE_CXX_FLAGS)
+        list(APPEND COMPILER_FLAGS_ENV "CXXFLAGS=${CMAKE_CXX_FLAGS}")
+endif()
+
 # Pass CMAKE compilers and compiler flags on to the installation of dependencies (most importantly impurityModel)
-add_custom_target(PYTHON_MODULE COMMAND ${IMPURITYMODEL_ENV} CC=${CMAKE_C_COMPILER} CFLAGS=${CMAKE_C_FLAGS} CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=${CMAKE_CXX_FLAGS} ${Python3_EXECUTABLE} -m pip install ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
+add_custom_target(PYTHON_MODULE COMMAND ${IMPURITYMODEL_ENV} IMPURITYMODEL_BUILD=${IMPURITYMODEL_BUILD} CC=${CMAKE_C_COMPILER} ${COMPILER_FLAGS_ENV} CXX=${CMAKE_CXX_COMPILER} ${Python3_EXECUTABLE} -m pip install ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
 
 Python3_add_library(${PROJECT_NAME} SHARED run_impurityModel.c)
 
