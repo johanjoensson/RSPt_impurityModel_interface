@@ -64,3 +64,6 @@ src/impurityModel_interface.egg-info/
 src/impurityModel_interface/__pycache__/
 src/run_impurityModel.c
 build/
+
+# Local checkouts cloned by -DEDITABLE_DEPS=ON
+dependencies/

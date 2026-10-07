@@ -62,3 +62,18 @@ mode with `-DIMPURITYMODEL_BUILD=release|debug|safe` (passed on as the
 nodes, since `release` compiles with `-march=native`. The value is cached, so
 to change it in an existing build directory pass `-DIMPURITYMODEL_BUILD=...`
 explicitly.
+
+By default `impurityModel` and `rspt2spectra` are installed from GitHub, which
+replaces any local editable installs in the environment. To develop against
+local checkouts instead, configure with `-DEDITABLE_DEPS=ON`, e.g.
+```
+cmake -B build -S . -DEDITABLE_DEPS=ON \
+      -DIMPURITYMODEL_SOURCE_DIR=$HOME/src/impurityModel \
+      -DRSPT2SPECTRA_SOURCE_DIR=$HOME/src/rspt2spectra
+```
+Both are then installed with `pip install --editable`, and the interface itself
+with `--no-deps` so the GitHub copies are not pulled back in. The source
+directories default to `dependencies/impurityModel` and
+`dependencies/rspt2spectra`; a directory that does not exist is cloned from
+`IMPURITYMODEL_GIT_URL` / `RSPT2SPECTRA_GIT_URL` (the forks by default) at
+configure time.

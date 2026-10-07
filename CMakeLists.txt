@@ -68,10 +68,36 @@ else()
         set(PIP_NODEPS)
 endif()
 
+# EDITABLE_DEPS: install local checkouts of impurityModel and rspt2spectra in editable mode
+# instead of the GitHub copies pinned in pyproject.toml. Point the *_SOURCE_DIR variables at
+# existing working trees; a directory that does not exist is cloned from the fork at configure
+# time.
+set(IMPURITYMODEL_SOURCE_DIR "${PROJECT_SOURCE_DIR}/dependencies/impurityModel" CACHE PATH
+        "Local impurityModel checkout used when EDITABLE_DEPS=ON")
+set(RSPT2SPECTRA_SOURCE_DIR "${PROJECT_SOURCE_DIR}/dependencies/rspt2spectra" CACHE PATH
+        "Local rspt2spectra checkout used when EDITABLE_DEPS=ON")
+set(IMPURITYMODEL_GIT_URL "https://github.com/johanjoensson/impurityModel.git" CACHE STRING
+        "Repository cloned into IMPURITYMODEL_SOURCE_DIR if it does not exist")
+set(RSPT2SPECTRA_GIT_URL "https://github.com/johanjoensson/rspt2spectra.git" CACHE STRING
+        "Repository cloned into RSPT2SPECTRA_SOURCE_DIR if it does not exist")
+
+set(PIP_EDITABLE_DEPS)
 if (${EDITABLE_DEPS})
-        set(PIP_EDITABLE_DEPS "--editable --src ${PROJECT_SOURCE_DIR}/dependencies/")
-else()
-        set(PIP_EDITABLE_DEPS )
+        find_package(Git REQUIRED)
+        foreach(dep IMPURITYMODEL RSPT2SPECTRA)
+                set(dep_dir "${${dep}_SOURCE_DIR}")
+                if(NOT EXISTS "${dep_dir}")
+                        message(STATUS "Cloning ${${dep}_GIT_URL} into ${dep_dir}")
+                        execute_process(
+                                COMMAND ${GIT_EXECUTABLE} clone ${${dep}_GIT_URL} ${dep_dir}
+                                COMMAND_ERROR_IS_FATAL ANY
+                        )
+                elseif(NOT EXISTS "${dep_dir}/pyproject.toml")
+                        message(FATAL_ERROR "${dep}_SOURCE_DIR=${dep_dir} is not a Python project (no pyproject.toml)")
+                endif()
+                message(STATUS "Editable ${dep}: ${dep_dir}")
+                list(APPEND PIP_EDITABLE_DEPS --editable ${dep_dir})
+        endforeach()
 endif()
 
 if (${PARALLEL_IMPURITYMODEL})
@@ -92,7 +118,20 @@ if(CMAKE_CXX_FLAGS)
 endif()
 
 # Pass CMAKE compilers and compiler flags on to the installation of dependencies (most importantly impurityModel)
-add_custom_target(PYTHON_MODULE COMMAND ${IMPURITYMODEL_ENV} IMPURITYMODEL_BUILD=${IMPURITYMODEL_BUILD} CC=${CMAKE_C_COMPILER} ${COMPILER_FLAGS_ENV} CXX=${CMAKE_CXX_COMPILER} ${Python3_EXECUTABLE} -m pip install ${PIP_NODEPS} ${PIP_USER} ${PROJECT_SOURCE_DIR} )
+set(PIP_INSTALL ${IMPURITYMODEL_ENV} IMPURITYMODEL_BUILD=${IMPURITYMODEL_BUILD} CC=${CMAKE_C_COMPILER} ${COMPILER_FLAGS_ENV} CXX=${CMAKE_CXX_COMPILER} ${Python3_EXECUTABLE} -m pip install ${PIP_USER})
+
+if (${EDITABLE_DEPS})
+        # The editable installs pull in their own requirements; the interface itself must then be
+        # installed with --no-deps, otherwise pip resolves the git URLs in pyproject.toml and
+        # replaces the editable installs with the GitHub copies. cffi, the one requirement of the
+        # interface that neither dependency provides, is ensured at configure time above.
+        add_custom_target(PYTHON_MODULE
+                COMMAND ${PIP_INSTALL} ${PIP_NODEPS} ${PIP_EDITABLE_DEPS}
+                COMMAND ${PIP_INSTALL} --no-deps ${PROJECT_SOURCE_DIR}
+        )
+else()
+        add_custom_target(PYTHON_MODULE COMMAND ${PIP_INSTALL} ${PIP_NODEPS} ${PROJECT_SOURCE_DIR})
+endif()
 
 Python3_add_library(${PROJECT_NAME} SHARED run_impurityModel.c)
 
