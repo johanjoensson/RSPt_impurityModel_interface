@@ -97,7 +97,6 @@ def test_selfenergy_against_reference():
         rot_to_spherical=data["rot_to_spherical"],
         cluster_label=data["label"],
         comm=MPI.COMM_WORLD,
-        reort=options["reort"],
         dense_cutoff=int(options["dense_cutoff"]),
         chain_restrict=bool(options["chain_restrict"]),
         occ_cutoff=float(options["occ_cutoff"]),

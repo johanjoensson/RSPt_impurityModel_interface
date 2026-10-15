@@ -70,7 +70,6 @@ def test_full_option_line():
     assert n_baths == 10
     assert basis.excitation_budget == 4
     assert fit_options["bath_geometry"] == "linked_chain"
-    assert solver.reort == "full"
     assert solver.dense_cutoff == 500
     assert fit_options["gamma"] == pytest.approx(0.1)
     assert fit_options["weight_function"] == "gaussian"
@@ -87,15 +86,17 @@ def test_full_option_line():
     assert fit_options["fit_unocc"] is True
 
 
-def test_pro_maps_to_partial():
-    *_, solver = parse_solver_line("8 10 4 chain pro")
-    assert solver.reort == "partial"
+@pytest.mark.parametrize("token", ["pro", "partial", "selective", "full", "periodic"])
+def test_retired_reort_tokens_still_parse_and_warn(token, capsys):
+    """Existing green.inp files carry a reorthogonalization token; it is accepted, ignored and announced."""
+    *_, solver = parse_solver_line(f"8 10 4 chain {token}")
+    assert not hasattr(solver, "reort")
+    assert f"'{token}' is retired" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("reort", ["partial", "selective", "full", "periodic"])
-def test_reort_modes(reort):
-    *_, solver = parse_solver_line(f"8 10 4 chain {reort}")
-    assert solver.reort == reort
+def test_the_none_token_is_silent(capsys):
+    parse_solver_line("8 10 4 chain none")
+    assert "retired" not in capsys.readouterr().out
 
 
 def test_chain_keeps_chain_restrict():
@@ -113,7 +114,7 @@ def test_solver_line_attrs_reproduces_the_flat_record():
         "dense_green no_chain_restrict fit_unocc"
     )
     attrs = solver_line_attrs(fit_options, basis, solver)
-    assert attrs["reort"] == "full"
+    assert "reort" not in attrs
     assert attrs["dense_cutoff"] == 500
     assert attrs["sparse_green"] is False
     assert "spin_flip_dj" not in attrs
@@ -135,7 +136,7 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["gf_tol"] is None and attrs["gf_real_tol"] is None and attrs["gf_min_weight"] is None
     # Every option the archive stores is present (25 keys; spin_flip_dj was removed). n_baths is
     # only added when the caller passes it.
-    assert len(attrs) == 25
+    assert len(attrs) == 24
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 

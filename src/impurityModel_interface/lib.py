@@ -111,7 +111,9 @@ def parse_solver_line(solver_line):
       N0     -- Nominal impurity occupation.
       Nbath  -- Number of bath states to fit per impurity orbital.
     Options (whitespace separated, case insensitive):
-      periodic | partial (pro) | selective | full -- Reorthogonalization mode.
+      none | pro | partial | selective | full | periodic -- RETIRED, parsed and ignored with a warning:
+                                              the Green's function never reorthogonalizes and the
+                                              eigensolver always does.
       star | chain | linked_chain | peeled -- Bath geometry.
       fit_unocc | fit_occ                  -- Also fit unoccupied bath states / only occupied (default).
       freeze_bath_energies                 -- Reuse the previous iteration's bath energies and
@@ -191,7 +193,6 @@ def parse_solver_line(solver_line):
         excitation_budget = None
     options = {
         "dense_cutoff": 1000,
-        "reort": "none",
         "fit_unocc": False,
         "freeze_bath_energies": False,
         "gamma": 0.01,
@@ -215,6 +216,7 @@ def parse_solver_line(solver_line):
         "gf_real_tol": None,
         "gf_min_weight": None,
     }
+    retired_reort = None
     if len(solver_array) > 3:
         skip_next = False
         for i in range(3, len(solver_array)):
@@ -230,10 +232,7 @@ def parse_solver_line(solver_line):
                 "full",
                 "periodic",
             }:
-                if arg.lower() == "pro":
-                    options["reort"] = "partial"
-                else:
-                    options["reort"] = arg.lower()
+                retired_reort = arg.lower()
             elif arg.lower() in {
                 "star",
                 "chain",
@@ -335,6 +334,12 @@ def parse_solver_line(solver_line):
             "collapse_chains",
         )
     }
+    if retired_reort not in (None, "none"):
+        print(
+            f"solver-line token '{retired_reort}' is retired and ignored: the Green's function runs without "
+            "reorthogonalization and the eigensolver always reorthogonalizes fully.",
+            flush=True,
+        )
     basis = BasisOptions(
         nominal_occ={0: nominal_occ},
         mixed_valence=None if options["mv"] is None else {0: options["mv"]},
@@ -348,7 +353,6 @@ def parse_solver_line(solver_line):
     )
     try:
         solver = SolverOptions(
-            reort=options["reort"],
             dense_cutoff=options["dense_cutoff"],
             sparse_green=options["sparse_green"],
             gf_method=options["gf_method"],
@@ -376,7 +380,6 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
     ``n_baths`` (bath states per impurity orbital) is included when given.
     """
     attrs = {
-        "reort": solver.reort,
         "dense_cutoff": solver.dense_cutoff,
         "sparse_green": solver.sparse_green,
         "gf_method": solver.gf_method,
@@ -418,7 +421,6 @@ _SETTINGS_LABELS = (
     ("weight_function", "Fitting weight function"),
     ("weight", "Fitting weight factor"),
     ("weight_w0", "Fitting weight center w0"),
-    ("reort", "Reorthogonalizaion mode"),
     ("dense_cutoff", "Dense matrix size cutoff"),
     ("sparse_green", "Sparse Green's function"),
     ("gf_method", "Green's function method"),
