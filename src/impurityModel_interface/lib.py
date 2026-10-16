@@ -710,30 +710,6 @@ def _parse_dc_line(dc_line):
             del dc_array[_i : _i + 2]
             break
 
-    # Optional 'ground_state_manifold' anywhere on the line, stripped the same way and for the
-    # same reason: it modifies *how* a criterion solves, not which criterion runs, so it has to
-    # compose with the spellings below rather than appear in each of their argument counts. Bare
-    # flag, no value.
-    #
-    # What it does: 'gap' and 'peak' ask each charge sector for its whole thermal manifold
-    # (`energy_cut(tau)`), then widen `num_wanted` until that window is exhausted. Their residual
-    # only ever reads `min(es)`, so on a workload whose N +- 1 spectrum is dense inside the window
-    # that widening is bought and thrown away -- measured on SrMnO3 cubic at a 512,000-determinant
-    # cap, four stacked solves per sector ending at 160 states. Setting this asks for the
-    # degenerate ground multiplet alone (`max_energy=0.0`).
-    #
-    # NOT free, and deliberately not the default: it also switches the criterion's reported
-    # impurity occupation from the thermal average to the ground state's, which are only the same
-    # where `occupation_spread` is negligible -- true on every fixture checked so far EXCEPT
-    # SrMnO3 (up to 0.065). That spread feeds `delta_sum` and so the reported `mu` resolution, not
-    # the root itself. Check it from a run with this flag OFF before turning it on.
-    dc_ground_state_manifold = False
-    for _i, _token in enumerate(dc_array):
-        if _token.lower() == "ground_state_manifold":
-            dc_ground_state_manifold = True
-            del dc_array[_i]
-            break
-
     # Optional 'de2_min X' anywhere on the line, stripped like 'alpha' and for the same reason:
     # it modifies how a criterion solves, not which criterion runs.
     #
@@ -809,7 +785,7 @@ def _parse_dc_line(dc_line):
     # Any may be followed by 'alpha <value>' or 'de2_min <value>' (both parsed and removed
     # above; 'de2_min' only reaches the criteria that run charge-sector solves, so on a static
     # scheme it parses and is simply unused). 'gap' and 'peak' may also carry the bare flag
-    # 'ground_state_manifold' and 'e_pt2 <value>' (likewise already parsed); every other
+    # and 'e_pt2 <value>' (likewise already parsed); every other
     # spelling rejects them rather than silently ignoring them -- see the assertions below for
     # why 'occ' is excluded on different grounds from the static schemes.
     _STATIC_SCHEMES = {"fll", "amf", "sigma_inf", "sigmainf", "nominal"}
@@ -863,17 +839,6 @@ def _parse_dc_line(dc_line):
         f"double-counting schemes run no solve at all -- '{dc_mode}' would ignore it silently. "
         "Remove it, or pick a criterion that solves ('gap', 'peak' or 'occ')."
     )
-    assert not (dc_ground_state_manifold and dc_mode not in {"gap", "peak"}), (
-        "'ground_state_manifold' applies to the 'gap' and 'peak' double-counting criteria, whose "
-        "residual reads only each sector's lowest energy. "
-        + (
-            "'occ' pins the thermal impurity occupation itself, so narrowing the manifold would "
-            "change the criterion, not just its cost."
-            if dc_mode == "occupation"
-            else f"The static scheme '{dc_mode}' runs no ground-state solve."
-        )
-        + " Remove it from the double-counting line."
-    )
     # 'occ' is excluded on the parity ground: it solves on the production ground-state path, so
     # it converges to the solver line's 'e_pt2' and only to that -- the same tolerance the
     # self-energy run's ground state uses. Rejected, not ignored, like the flag above.
@@ -889,7 +854,7 @@ def _parse_dc_line(dc_line):
         + " Remove it from the double-counting line."
     )
 
-    return dc_mode, dc_target, dc_alpha, dc_ground_state_manifold, dc_de2_min, dc_e_pt2_tol
+    return dc_mode, dc_target, dc_alpha, dc_de2_min, dc_e_pt2_tol
 
 
 def _run_impmod_ed(
@@ -1261,7 +1226,7 @@ def _solve(
         report_continuum_reference(h_dft, hyb, hyb_fit, w, eim, tau, n0_disc, rank=rank)
 
     if dc_flag == 1:
-        dc_mode, dc_target, dc_alpha, dc_gs_manifold, dc_de2_min, dc_e_pt2_tol = _parse_dc_line(dc_line)
+        dc_mode, dc_target, dc_alpha, dc_de2_min, dc_e_pt2_tol = _parse_dc_line(dc_line)
 
         # The charge sector the ED criteria settle on, handed to this iteration's self-energy
         # call so it starts from the state the DC was measured against (see
@@ -1291,7 +1256,6 @@ def _solve(
                     offset=dc_target,
                     comm=comm,
                     verbosity=verbosity,
-                    ground_state_manifold=dc_gs_manifold,
                     de2_min=dc_de2_min,
                     e_pt2_tol=dc_e_pt2_tol,
                     return_sector=True,
@@ -1304,7 +1268,6 @@ def _solve(
                     peak_position=dc_target,
                     comm=comm,
                     verbosity=verbosity,
-                    ground_state_manifold=dc_gs_manifold,
                     de2_min=dc_de2_min,
                     e_pt2_tol=dc_e_pt2_tol,
                     return_sector=True,
