@@ -166,6 +166,24 @@ def parse_solver_line(solver_line):
                                               shortens every Green's function unit and leaves the Matsubara
                                               self-energy unchanged. Do not loosen it far: RSPt builds the
                                               next bath fit from the real-axis self-energy.
+      gf_settle on|off                     -- Support settle of the block-Lanczos Green's function: a unit stops
+                                              admitting new determinants once, over 16 blocks, the largest
+                                              amplitude its next block carries on a determinant reached for
+                                              the first time stays at or below gf_settle_ratio x slater_min
+                                              and is not growing; it then carries on as the exact recurrence on
+                                              the determinants it has, dropping those whose next-block amplitude
+                                              stayed at or below that bound. Default on. gf_method lanczos only.
+      gf_settle_ratio X                    -- Settle threshold as a MULTIPLE OF slater_min (not a fraction of
+                                              the seed norm like gf_admit_tol): 1 settles when every excluded
+                                              determinant would have been pruned from the next block anyway,
+                                              larger settles sooner, 0 is closure only. Default 3 (impurityModel's
+                                              GF_SETTLE_RATIO knob, measured on NiO and SMO). Needs gf_settle on;
+                                              gf_method lanczos only.
+      gf_settle_retry on|off               -- If the real-axis self-energy fails the causality check and units
+                                              settled (none capped or held), solve them once more closure-only
+                                              (gf_settle_ratio 0) and judge the new G; can take as long as an
+                                              unsettled run. The attribution is printed either way; it never
+                                              falls back to 'gf_settle off'. Default off. Needs gf_settle on.
       gf_min_weight X                      -- Drop thermal states whose normalised Boltzmann weight is
                                               below X from the Green's function and self-energy (whole
                                               degenerate manifolds; never the ground one). Default: keep
@@ -212,6 +230,9 @@ def parse_solver_line(solver_line):
         "gf_method": "lanczos",
         "gf_admission": None,
         "gf_admit_tol": None,
+        "gf_settle": None,
+        "gf_settle_ratio": None,
+        "gf_settle_retry": None,
         "gf_tol": None,
         "gf_real_tol": None,
         "gf_min_weight": None,
@@ -305,7 +326,13 @@ def parse_solver_line(solver_line):
                     options["gf_admit_tol"] = float(value)
                     assert options["gf_admit_tol"] > 0, f"'{arg}' must be positive"
                 skip_next = True
-            elif arg.lower() in {"gf_tol", "gf_real_tol", "gf_min_weight"}:
+            elif arg.lower() in {"gf_settle", "gf_settle_retry"}:
+                assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs on or off"
+                value = solver_array[i + 1].lower()
+                assert value in {"on", "off"}, f"'{arg}' must be on or off, got {solver_array[i + 1]!r}"
+                options[arg.lower()] = value == "on"
+                skip_next = True
+            elif arg.lower() in {"gf_tol", "gf_real_tol", "gf_min_weight", "gf_settle_ratio"}:
                 assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
                 # Range and kernel checks live in SolverOptions, reported below where the line is parsed.
                 options[arg.lower()] = float(solver_array[i + 1])
@@ -358,6 +385,9 @@ def parse_solver_line(solver_line):
             gf_method=options["gf_method"],
             gf_admission=options["gf_admission"],
             gf_admit_tol=options["gf_admit_tol"],
+            gf_settle=options["gf_settle"],
+            gf_settle_ratio=options["gf_settle_ratio"],
+            gf_settle_retry=options["gf_settle_retry"],
             gf_tol=options["gf_tol"],
             gf_real_tol=options["gf_real_tol"],
             gf_min_weight=options["gf_min_weight"],
@@ -387,6 +417,10 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         # as given, so an archive read back resolves them the way the run did.
         "gf_admission": solver.gf_admission,
         "gf_admit_tol": solver.gf_admit_tol,
+        # None = settle on / GF_SETTLE_RATIO knob / retry off; stored as given so a replay resolves them as the run did.
+        "gf_settle": solver.gf_settle,
+        "gf_settle_ratio": solver.gf_settle_ratio,
+        "gf_settle_retry": solver.gf_settle_retry,
         # None = impurityModel's default (GF_TOL / GF_REAL_TOL knobs, else max(slater_min^2, 1e-9)).
         "gf_tol": solver.gf_tol,
         "gf_real_tol": solver.gf_real_tol,
@@ -426,6 +460,9 @@ _SETTINGS_LABELS = (
     ("gf_method", "Green's function method"),
     ("gf_admission", "GF basis admission"),
     ("gf_admit_tol", "GF admission threshold"),
+    ("gf_settle", "GF support settle"),
+    ("gf_settle_ratio", "GF settle ratio (x slater_min)"),
+    ("gf_settle_retry", "GF settle retry"),
     ("gf_tol", "GF convergence tolerance"),
     ("gf_real_tol", "GF real-axis tolerance"),
     ("gf_min_weight", "GF minimal thermal weight"),
@@ -458,6 +495,16 @@ def format_settings_header(nominal_occ, fit_options, basis, solver, n_baths=None
         attrs["gf_admission"] = "auto"
     if attrs.get("gf_admit_tol", "") is None:
         attrs["gf_admit_tol"] = "default" if attrs.get("gf_admission") == "outer" else "n/a"
+    if attrs.get("gf_settle", "") is None:
+        attrs["gf_settle"] = "on"
+    elif isinstance(attrs.get("gf_settle"), bool):
+        attrs["gf_settle"] = "on" if attrs["gf_settle"] else "off"
+    if attrs.get("gf_settle_ratio", "") is None:
+        attrs["gf_settle_ratio"] = "default"
+    if attrs.get("gf_settle_retry", "") is None:
+        attrs["gf_settle_retry"] = "off"
+    elif isinstance(attrs.get("gf_settle_retry"), bool):
+        attrs["gf_settle_retry"] = "on" if attrs["gf_settle_retry"] else "off"
     for key in ("gf_tol", "gf_real_tol"):
         if attrs.get(key, "") is None:
             attrs[key] = "default"

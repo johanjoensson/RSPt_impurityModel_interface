@@ -134,9 +134,10 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["e_pt2_tol"] is None
     assert attrs["gf_admission"] is None and attrs["gf_admit_tol"] is None
     assert attrs["gf_tol"] is None and attrs["gf_real_tol"] is None and attrs["gf_min_weight"] is None
-    # Every option the archive stores is present (25 keys; spin_flip_dj was removed). n_baths is
-    # only added when the caller passes it.
-    assert len(attrs) == 24
+    # Every option the archive stores is present (27 keys: spin_flip_dj was removed, gf_settle,
+    # gf_settle_ratio and gf_settle_retry added). n_baths is only added when the caller passes it.
+    assert attrs["gf_settle"] is None and attrs["gf_settle_ratio"] is None and attrs["gf_settle_retry"] is None
+    assert len(attrs) == 27
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
@@ -435,3 +436,33 @@ def test_the_thermal_weight_cutoff_parses_and_is_archived():
     assert solver_line_attrs(fit_options, basis, solver)["gf_min_weight"] == 1e-3
     with pytest.raises(RuntimeError, match="gf_min_weight must lie in"):
         parse_solver_line("3 4 8 linked_chain gf_min_weight 1")
+
+
+def test_the_settle_tokens_reach_the_solver_options_and_the_record():
+    *_head, solver = parse_solver_line("8 10 4 peeled gf_settle off slater_min 0")
+    assert solver.gf_settle is False and solver.gf_settle_ratio is None
+    *_head, solver = parse_solver_line("8 10 4 peeled gf_settle_ratio 3 slater_min 1e-8")
+    assert solver.gf_settle is None and solver.gf_settle_ratio == 3.0
+    *_head, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
+    assert solver.gf_settle is None and solver.gf_settle_ratio is None
+
+
+@pytest.mark.parametrize(
+    "line,match",
+    [
+        ("8 10 4 peeled gf_settle maybe", "on or off"),
+        ("8 10 4 peeled gf_settle", "needs on or off"),
+        ("8 10 4 peeled gf_settle off gf_settle_ratio 2", "only applies with the support settle on"),
+        ("8 10 4 peeled gf_method bicgstab gf_settle on", "applies only to gf_method='lanczos'"),
+    ],
+)
+def test_the_settle_tokens_refuse_a_contradiction(line, match):
+    with pytest.raises((AssertionError, ValueError, RuntimeError), match=match):
+        parse_solver_line(line)
+
+
+def test_the_settle_retry_token():
+    *_head, solver = parse_solver_line("8 10 4 peeled gf_settle_retry off slater_min 1e-8")
+    assert solver.gf_settle_retry is False
+    with pytest.raises((AssertionError, ValueError, RuntimeError), match="contradicts gf_settle off"):
+        parse_solver_line("8 10 4 peeled gf_settle off gf_settle_retry on")
