@@ -46,6 +46,33 @@ def test_freeze_bath_energies_is_off_by_default_and_opt_in():
     assert fit_options["freeze_bath_energies"] is True
 
 
+def test_warm_start_is_on_by_default_with_a_five_percent_margin():
+    _, _, fit_options, _, _ = parse_solver_line("8 10 4 peeled")
+    assert fit_options["warm_start"] is True
+    assert fit_options["warm_tol"] == pytest.approx(0.05)
+
+
+def test_cold_fit_and_warm_tol_parse():
+    _, _, fit_options, _, _ = parse_solver_line("8 10 4 peeled COLD_FIT gamma 0.1")
+    assert fit_options["warm_start"] is False
+    assert fit_options["gamma"] == pytest.approx(0.1)
+    _, _, fit_options, _, _ = parse_solver_line("8 10 4 warm_tol 0.2 peeled")
+    assert fit_options["warm_start"] is True
+    assert fit_options["warm_tol"] == pytest.approx(0.2)
+    assert fit_options["bath_geometry"] == "peeled_linked_chain"
+
+
+@pytest.mark.parametrize("value", ["-0.1", "1.5"])
+def test_warm_tol_must_be_a_fraction(value):
+    with pytest.raises(AssertionError, match="warm_tol"):
+        parse_solver_line(f"8 10 4 warm_tol {value}")
+
+
+def test_cold_fit_contradicts_freezing():
+    with pytest.raises(RuntimeError, match="contradict"):
+        parse_solver_line("8 10 4 freeze_bath_energies cold_fit")
+
+
 @pytest.mark.parametrize("comment_char", ["!", "#"])
 def test_comments_are_stripped(comment_char):
     n0, n_baths, fit_options, basis, _solver = parse_solver_line(
@@ -129,14 +156,16 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["weight_function"] == "gaussian"
     assert attrs["fit_unocc"] is True
     assert attrs["freeze_bath_energies"] is False
+    assert attrs["warm_start"] is True
+    assert attrs["warm_tol"] == pytest.approx(0.05)
     assert attrs["excitation_budget"] == 4
     assert attrs["gf_method"] == "lanczos"
     assert attrs["e_pt2_tol"] is None
     assert attrs["gf_admission"] is None and attrs["gf_admit_tol"] is None
     assert attrs["gf_tol"] is None and attrs["gf_real_tol"] is None and attrs["gf_min_weight"] is None
-    # Every option the archive stores is present (25 keys; spin_flip_dj was removed). n_baths is
+    # Every option the archive stores is present (26 keys; spin_flip_dj was removed). n_baths is
     # only added when the caller passes it.
-    assert len(attrs) == 24
+    assert len(attrs) == 26
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 

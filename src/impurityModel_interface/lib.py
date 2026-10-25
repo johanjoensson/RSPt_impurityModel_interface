@@ -120,6 +120,17 @@ def parse_solver_line(solver_line):
                                               only re-solve the hoppings (least squares); no
                                               bath-energy optimization. Off by default; the
                                               first iteration (nothing stored) does a full fit.
+                                              For extreme cases: the default warm start already
+                                              keeps the bath from jumping between iterations.
+      warm_tol X                           -- Warm-start margin (default 0.05). By default each
+                                              iteration's fit starts from the previous iteration's
+                                              bath energies, and that warm fit is kept unless a
+                                              global search finds one whose cost is lower by more
+                                              than this relative margin. 0 takes any strictly
+                                              better global fit.
+      cold_fit                             -- No warm start: fit every iteration from scratch.
+                                              The global minimum can then jump between
+                                              near-degenerate baths from one iteration to the next.
       gamma X                              -- Regularization parameter for the bath fit.
       dense_cutoff N                       -- Use dense eigensolver below this matrix size.
       <weight function name>               -- Weight function for the fit; one of
@@ -195,6 +206,8 @@ def parse_solver_line(solver_line):
         "dense_cutoff": 1000,
         "fit_unocc": False,
         "freeze_bath_energies": False,
+        "warm_start": True,
+        "warm_tol": 0.05,
         "gamma": 0.01,
         "weight_function": "unit",
         "weight": 2,
@@ -250,6 +263,13 @@ def parse_solver_line(solver_line):
                 options["fit_unocc"] = False
             elif arg.lower() == "freeze_bath_energies":
                 options["freeze_bath_energies"] = True
+            elif arg.lower() == "cold_fit":
+                options["warm_start"] = False
+            elif arg.lower() == "warm_tol":
+                assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
+                options["warm_tol"] = float(solver_array[i + 1])
+                assert 0 <= options["warm_tol"] <= 1, f"'{arg}' must be between 0 and 1"
+                skip_next = True
             elif arg.lower() == "weight_w0":
                 options["weight_w0"] = float(solver_array[i + 1])
                 skip_next = True
@@ -312,6 +332,11 @@ def parse_solver_line(solver_line):
                 skip_next = True
             else:
                 raise RuntimeError(f"Unknown solver parameter {arg}.\n--->Other solver params {solver_array[2:]}")
+    if options["freeze_bath_energies"] and not options["warm_start"]:
+        raise RuntimeError(
+            "freeze_bath_energies and cold_fit contradict each other: freezing holds the previous "
+            "iteration's bath energies, a cold fit ignores them."
+        )
     if options["bath_geometry"] == "star":
         options["chain_restrict"] = False
         options["collapse_chains"] = True
@@ -330,6 +355,8 @@ def parse_solver_line(solver_line):
             "weight_w0",
             "fit_unocc",
             "freeze_bath_energies",
+            "warm_start",
+            "warm_tol",
             "bath_geometry",
             "collapse_chains",
         )
@@ -417,6 +444,8 @@ _SETTINGS_LABELS = (
     ("collapse_chains", "Collapse chains"),
     ("fit_unocc", "Fit unoccupied states"),
     ("freeze_bath_energies", "Freeze bath energies"),
+    ("warm_start", "Warm-start bath fit"),
+    ("warm_tol", "Warm-start margin"),
     ("gamma", "Fit regularization gamma"),
     ("weight_function", "Fitting weight function"),
     ("weight", "Fitting weight factor"),
@@ -577,11 +606,14 @@ def _previous_damped_dc(hdf5_filename, label, comm):
 def _previous_bath_energies(hdf5_filename, label, block_structure):
     """The bath energies from the most recent stored fit, one array per inequivalent block.
 
-    For ``freeze_bath_energies``: unlike the fingerprint-keyed reuse in ``fit_hyb_star``, this
-    ignores the hybridization fingerprint and the iteration boundary -- it just wants the last
-    energies the fitter produced, to hold them fixed while only the hoppings are re-solved
-    against this iteration's hybridization. Returns ``None`` when nothing is stored yet (the
-    first iteration), which the caller reads as "fall back to a full fit this once".
+    For the warm start and ``freeze_bath_energies``: unlike the fingerprint-keyed reuse in
+    ``fit_hyb_star``, this ignores the hybridization fingerprint and the iteration boundary -- it
+    just wants the last energies the fitter produced, to seed (or hold fixed) this iteration's
+    fit. Returns ``None`` when nothing is stored yet (the first iteration), and also when the most
+    recent fit was made on a different block partition: the energies are stored per inequivalent
+    block, so on another partition they would seed the wrong blocks. The caller reads ``None`` as
+    "do a cold, full fit this once". An archive written before the partition was recorded is
+    taken as matching.
 
     Read on rank 0; the caller broadcasts. Energies are de-duplicated (the archive stores the
     post-``flatten_star_levels`` list, with one entry per coupled orbital component).
@@ -593,6 +625,14 @@ def _previous_bath_energies(hdf5_filename, label, block_structure):
                 fit_g = ar.get(f"{label.strip()} {it}/Bath fit")
                 if fit_g is None or "ebs_star" not in fit_g:
                     continue
+                stored_structure = fit_g.attrs.get("block structure", None)
+                if stored_structure is not None and stored_structure != repr(block_structure):
+                    print(
+                        f"The previous bath fit ({label.strip()} {it}) was made on another block "
+                        "partition; its bath energies are not reused.",
+                        flush=True,
+                    )
+                    return None
                 return [
                     np.unique(np.asarray(fit_g[f"ebs_star/{block_index}"], dtype=float))
                     for block_index in block_structure.inequivalent_blocks
@@ -1136,6 +1176,8 @@ def _solve(
         valence_bath_only=not fit_options["fit_unocc"],
         bath_geometry=fit_options["bath_geometry"],
         freeze_bath_energies=fit_options["freeze_bath_energies"],
+        warm_start=fit_options["warm_start"],
+        warm_tol=fit_options["warm_tol"],
         label=label.strip(),
         hdf5_filename=hdf5_filename,
         verbose=(verbosity >= 1 or dc_flag == 1),
@@ -1556,6 +1598,8 @@ def get_ed_h0(
     valence_bath_only=True,
     bath_geometry="peeled_linked_chain",
     freeze_bath_energies=False,
+    warm_start=True,
+    warm_tol=0.05,
     label=None,
     hdf5_filename="impurityModel_data.h5",
     verbose=True,
@@ -1582,6 +1626,9 @@ def get_ed_h0(
     imag_only     -- Currently ignored; rspt2spectra's fit_hyb does not support
                      fitting only the imaginary part. Kept for API stability.
     valence_bath_only -- Only fit bath stated in the valence band, default: True.
+    freeze_bath_energies -- Hold the bath energies at the previous fit; re-solve only the hoppings.
+    warm_start    -- Seed the fit with the previous fit's bath energies and keep the warm-started
+                     fit unless a global search beats its cost by more than ``warm_tol``.
     label          -- Label for the cluster, used for saving a copy of the Hamiltonian
                       that can be plugged into the Matsubara ED solver in RSPt, default: None,
 
@@ -1620,6 +1667,8 @@ def get_ed_h0(
         comm,
         hyb_fingerprint=hyb_fingerprint,
         freeze_bath_energies=freeze_bath_energies,
+        warm_start=warm_start,
+        warm_tol=warm_tol,
     )
 
     # rspt2spectra turns the (flattened) star fit into the requested bath
@@ -1698,6 +1747,8 @@ def fit_hyb_star(
     comm,
     hyb_fingerprint="",
     freeze_bath_energies=False,
+    warm_start=True,
+    warm_tol=0.05,
 ):
     vs_star = None
     ebs_star = None
@@ -1755,7 +1806,7 @@ def fit_hyb_star(
             )
         else:
             print(
-                f"Bath fit computed fresh for {label!r} {iteration_label} (no fit stored yet this iteration).",
+                f"Bath fit computed for {label!r} {iteration_label} (no fit stored yet this iteration).",
                 flush=True,
             )
     if comm is not None:
@@ -1763,28 +1814,33 @@ def fit_hyb_star(
         vs_star = comm.bcast(vs_star, root=0)
         shifts = comm.bcast(shifts, root=0)
 
-    # freeze_bath_energies: hold the bath energies fixed at the most recent stored fit and
-    # re-solve only the hoppings against this iteration's hybridization. Skipped when the exact
-    # fit was just reused (``ebs_star`` already set, rank-consistent after the bcast above) --
-    # that path already returns a consistent model -- and on the first iteration, where nothing
-    # is stored yet, we do a full fit once. Gated on ``ebs_star is None`` rather than
-    # ``read_hopping`` so every rank takes the same branch into the collective below.
-    frozen_ebs = None
-    if freeze_bath_energies and ebs_star is None:
+    # Seed this fit with the most recent stored bath energies. freeze_bath_energies holds them
+    # fixed and re-solves only the hoppings against this iteration's hybridization; the default
+    # warm start lets them relax, and rspt2spectra keeps that warm fit unless a global search beats
+    # it by more than warm_tol -- otherwise the global minimum hops between near-degenerate baths
+    # as the hybridization drifts, and the self-energy with it. Skipped when the exact fit was just
+    # reused (``ebs_star`` already set, rank-consistent after the bcast above) -- that path already
+    # returns a consistent model -- and on the first iteration, where nothing is stored yet, we do
+    # a cold, full fit once. Gated on ``ebs_star is None`` rather than ``read_hopping`` so every
+    # rank takes the same branch into the collective below.
+    previous_ebs = None
+    if (freeze_bath_energies or warm_start) and ebs_star is None:
         if comm is None or comm.rank == 0:
-            frozen_ebs = _previous_bath_energies(hdf5_filename, label, block_structure)
+            previous_ebs = _previous_bath_energies(hdf5_filename, label, block_structure)
         if comm is not None:
-            frozen_ebs = comm.bcast(frozen_ebs, root=0)
+            previous_ebs = comm.bcast(previous_ebs, root=0)
         if comm is None or comm.rank == 0:
-            if frozen_ebs is None:
-                print(
-                    "freeze_bath_energies is set but no previous bath fit is stored; doing a full fit this iteration.",
-                    flush=True,
-                )
-            else:
+            mode = "freeze_bath_energies is set" if freeze_bath_energies else "Warm start"
+            if previous_ebs is None:
+                print(f"{mode}: no usable previous bath fit is stored; doing a cold, full fit.", flush=True)
+            elif freeze_bath_energies:
                 print("Bath energies FROZEN at the previous fit; re-solving hoppings only.", flush=True)
+            else:
+                print(f"Bath fit warm-started from the previous fit (margin {warm_tol:g}).", flush=True)
 
+    warm_start_info = None
     if ebs_star is None:
+        warm_start_info = []
         trace_phase_hyb = np.sum(np.diagonal(phase_hyb, axis1=1, axis2=2), axis=1)
         w_min = w[np.argmax(np.abs(trace_phase_hyb) > 1e-6)]
         w_max = w[-(np.argmax(np.abs(trace_phase_hyb)[::-1] > 1e-6) + 1)]
@@ -1799,8 +1855,10 @@ def fit_hyb_star(
             verbose=verbose,
             comm=comm,
             weight_fun=get_weight_function(weight_function, weight_w0, exp_weight),
-            ebs_guess=frozen_ebs,
-            optimize_bath_energies=frozen_ebs is None,
+            ebs_guess=previous_ebs,
+            optimize_bath_energies=not (freeze_bath_energies and previous_ebs is not None),
+            warm_accept_tol=warm_tol,
+            warm_start_info=warm_start_info,
         )
     for i in range(len(ebs_star)):
         if len(ebs_star[i]) == 0:
@@ -1840,6 +1898,13 @@ def fit_hyb_star(
             fit_g = ar.require_group(f"{label} {it}/Bath fit")
             fit_g.attrs["hyb fingerprint"] = hyb_fingerprint
             fit_g.attrs["block structure"] = repr(block_structure)
+            if warm_start_info is not None:
+                # Audit trail, one entry per inequivalent block: whether the previous bath was
+                # kept or a better global fit replaced it ("cold" when there was nothing to start
+                # from), and the two costs the decision compared (NaN when not computed).
+                fit_g.attrs["warm start"] = [info["status"] for info in warm_start_info]
+                for key in ("cost warm", "cost global"):
+                    fit_g.attrs[key] = np.array([info.get(key, np.nan) for info in warm_start_info], dtype=float)
             vs_g = fit_g.require_group("vs_star")
             ebs_g = fit_g.require_group("ebs_star")
             shifts_g = fit_g.require_group("shifts")

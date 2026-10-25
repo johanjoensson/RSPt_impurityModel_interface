@@ -1,4 +1,4 @@
-"""``freeze_bath_energies``: reuse the previous fit's bath energies, re-solve only the hoppings.
+"""``freeze_bath_energies`` and the warm start: seed this fit with the previous fit's bath energies.
 
 The interface side is ``_previous_bath_energies`` -- it digs the most recent stored bath
 energies out of the archive, ignoring the hybridization fingerprint (unlike the reuse path in
@@ -63,3 +63,30 @@ def test_skips_iterations_without_a_fit(tmp_path):
     eb = _previous_bath_energies(path, LABEL, BLOCKS)
     np.testing.assert_allclose(eb[0], [-0.4])
     np.testing.assert_allclose(eb[1], [-0.7])
+
+
+def test_a_fit_on_another_block_partition_is_not_reused(tmp_path, capsys):
+    # The energies are stored per inequivalent block; on a changed partition they would seed the
+    # wrong blocks, so the lookup gives nothing and the caller does a cold fit.
+    path = tmp_path / "a.h5"
+    with h5.File(path, "w") as f:
+        f.attrs["last iteration"] = 3
+        _write_fit(f, 2, [-0.4], [-0.7])  # older, same partition: must not be reached for
+        _write_fit(f, 3, [-0.5], [-0.8])
+        f[f"{LABEL} 2/Bath fit"].attrs["block structure"] = repr(BLOCKS)
+        f[f"{LABEL} 3/Bath fit"].attrs["block structure"] = "BlockStructure(blocks=[[0, 1, 2]])"
+
+    assert _previous_bath_energies(path, LABEL, BLOCKS) is None
+    assert "another block partition" in capsys.readouterr().out
+
+
+def test_a_fit_on_the_same_block_partition_is_reused(tmp_path):
+    path = tmp_path / "a.h5"
+    with h5.File(path, "w") as f:
+        f.attrs["last iteration"] = 3
+        _write_fit(f, 3, [-0.5], [-0.8])
+        f[f"{LABEL} 3/Bath fit"].attrs["block structure"] = repr(BLOCKS)
+
+    eb = _previous_bath_energies(path, LABEL, BLOCKS)
+    np.testing.assert_allclose(eb[0], [-0.5])
+    np.testing.assert_allclose(eb[1], [-0.8])
