@@ -164,7 +164,8 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["gf_admission"] is None and attrs["gf_admit_tol"] is None
     assert attrs["gf_tol"] is None and attrs["gf_real_tol"] is None and attrs["gf_min_weight"] is None
     assert attrs["gf_settle"] is None and attrs["gf_settle_ratio"] is None and attrs["gf_settle_retry"] is None
-    assert len(attrs) == 29
+    assert attrs["gf_prune_tol"] is None and attrs["gf_refine_rounds"] is None and attrs["cost_budget"] is None
+    assert len(attrs) == 35
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
@@ -491,3 +492,62 @@ def test_the_settle_retry_token():
     assert solver.gf_settle_retry is False
     with pytest.raises((AssertionError, ValueError, RuntimeError), match="contradicts gf_settle off"):
         parse_solver_line("8 10 4 peeled gf_settle off gf_settle_retry on")
+
+
+def test_the_pruning_refinement_and_cost_tokens_reach_the_options_and_the_record():
+    line = (
+        "8 10 4 peeled gf_prune_tol 1e-4 gf_first_shell_tol 1e-6 gf_refine_rounds 2 gf_refine_tol 0.01 "
+        "gf_refine_swap 0.2 cost_budget 0.5 slater_min 1e-8"
+    )
+    _occ, _n, fit_options, basis, solver = parse_solver_line(line)
+    assert (solver.gf_prune_tol, solver.gf_first_shell_tol) == (1e-4, 1e-6)
+    assert (solver.gf_refine_rounds, solver.gf_refine_tol, solver.gf_refine_swap) == (2, 0.01, 0.2)
+    assert basis.cost_budget == 0.5
+    attrs = solver_line_attrs(fit_options, basis, solver)
+    assert attrs["gf_prune_tol"] == 1e-4 and attrs["gf_refine_rounds"] == 2 and attrs["cost_budget"] == 0.5
+    *_head, solver = parse_solver_line("8 10 4 peeled gf_prune_tol 0 gf_refine_rounds 0 slater_min 1e-8")
+    assert solver.gf_prune_tol == 0.0 and solver.gf_refine_rounds == 0
+    *_head, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
+    assert solver.gf_prune_tol is None and solver.gf_refine_rounds is None
+
+
+@pytest.mark.parametrize(
+    "line,match",
+    [
+        ("8 10 4 peeled gf_prune_tol", "needs a value"),
+        ("8 10 4 peeled gf_refine_rounds two", "invalid literal"),
+        ("8 10 4 peeled gf_prune_tol 1e-3 gf_settle on", "exclusive with the support settle"),
+        ("8 10 4 peeled gf_prune_tol 0 gf_first_shell_tol 1e-3", "pruning is switched off"),
+        ("8 10 4 peeled gf_refine_rounds 0 gf_refine_swap 0.1", "need gf_refine_rounds > 0"),
+        ("8 10 4 peeled gf_refine_swap 0.9", "gf_refine_swap must be in"),
+        ("8 10 4 peeled cost_budget -1", "cost_budget must be positive"),
+    ],
+)
+def test_the_new_tokens_refuse_a_contradiction(line, match):
+    with pytest.raises((AssertionError, ValueError, RuntimeError), match=match):
+        parse_solver_line(line)
+
+
+def test_the_settings_header_names_the_defaults_and_the_explicit_offs():
+    nominal, _n, fit_options, basis, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
+    header = format_settings_header(nominal, fit_options, basis, solver)
+    assert "default (1e-3)" in header and "default (3)" in header
+    nominal, _n, fit_options, basis, solver = parse_solver_line(
+        "8 10 4 peeled gf_prune_tol 0 gf_refine_rounds 0 slater_min 1e-8"
+    )
+    assert header != format_settings_header(nominal, fit_options, basis, solver)
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["gf_prune_tol", "gf_first_shell_tol", "gf_refine_rounds", "gf_refine_tol", "gf_refine_swap", "cost_budget"],
+)
+def test_every_new_archive_key_is_the_name_impurityModel_reads(key):
+    # A misspelt key would be written, never read, and the replay would silently run the default.
+    import inspect
+
+    from impurityModel.ed import model
+
+    _occ, _n, fit_options, basis, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
+    assert key in solver_line_attrs(fit_options, basis, solver)
+    assert f'"{key}"' in inspect.getsource(model._read_archive_group)

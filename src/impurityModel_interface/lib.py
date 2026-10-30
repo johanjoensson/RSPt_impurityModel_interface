@@ -195,6 +195,26 @@ def parse_solver_line(solver_line):
                                               (gf_settle_ratio 0) and judge the new G; can take as long as an
                                               unsettled run. The attribution is printed either way; it never
                                               falls back to 'gf_settle off'. Default off. Needs gf_settle on.
+      gf_prune_tol X                       -- Pruned growth of the block-Lanczos Green's function: a step admits a new
+                                              determinant only if its largest amplitude on the normalised step block
+                                              exceeds X, so a capped unit reaches a greater H-depth where the
+                                              amplitude is. Default 1e-3; 0 switches it off. Replaces the support
+                                              settle (gf_settle on, gf_settle_ratio and gf_settle_retry are refused
+                                              with it). gf_method lanczos only.
+      gf_first_shell_tol X                 -- With pruning: the same cut for the seeds' first H-shell, kept whole by
+                                              default. Not with gf_prune_tol 0.
+      gf_refine_rounds N                   -- Swap refinement of a unit the determinant cap froze: up to N rounds
+                                              of swapping the least important retained determinants for the most
+                                              important discovered ones at the fixed cap. Default 3; 0 switches it
+                                              off. gf_method lanczos only.
+      gf_refine_tol X                      -- Stop refining when the estimated remaining gain is below this fraction
+                                              of max|G| on the scoring shifts, in (0, 1). Default 1e-3. Needs
+                                              gf_refine_rounds above 0.
+      gf_refine_swap X                     -- Largest fraction of the cap one round swaps, in (0, 0.5]. Default 0.1.
+                                              Needs gf_refine_rounds above 0.
+      cost_budget X                        -- Hopping-cost budget alpha beside excitation_budget (bath excitations
+                                              cost by their coupling distance from the impurity). Positive. Default
+                                              off.
       gf_min_weight X                      -- Drop thermal states whose normalised Boltzmann weight is
                                               below X from the Green's function and self-energy (whole
                                               degenerate manifolds; never the ground one). Default: keep
@@ -246,6 +266,12 @@ def parse_solver_line(solver_line):
         "gf_settle": None,
         "gf_settle_ratio": None,
         "gf_settle_retry": None,
+        "gf_prune_tol": None,
+        "gf_first_shell_tol": None,
+        "gf_refine_rounds": None,
+        "gf_refine_tol": None,
+        "gf_refine_swap": None,
+        "cost_budget": None,
         "gf_tol": None,
         "gf_real_tol": None,
         "gf_min_weight": None,
@@ -352,7 +378,21 @@ def parse_solver_line(solver_line):
                 assert value in {"on", "off"}, f"'{arg}' must be on or off, got {solver_array[i + 1]!r}"
                 options[arg.lower()] = value == "on"
                 skip_next = True
-            elif arg.lower() in {"gf_tol", "gf_real_tol", "gf_min_weight", "gf_settle_ratio"}:
+            elif arg.lower() == "gf_refine_rounds":
+                assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
+                options["gf_refine_rounds"] = int(solver_array[i + 1])
+                skip_next = True
+            elif arg.lower() in {
+                "gf_tol",
+                "gf_real_tol",
+                "gf_min_weight",
+                "gf_settle_ratio",
+                "gf_prune_tol",
+                "gf_first_shell_tol",
+                "gf_refine_tol",
+                "gf_refine_swap",
+                "cost_budget",
+            }:
                 assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
                 # Range and kernel checks live in SolverOptions, reported below where the line is parsed.
                 options[arg.lower()] = float(solver_array[i + 1])
@@ -403,6 +443,7 @@ def parse_solver_line(solver_line):
         occ_cutoff=options["occ_cutoff"],
         slater_weight_min=options["slater_min"],
         excitation_budget=excitation_budget,
+        cost_budget=options["cost_budget"],
         e_pt2_tol=options["e_pt2_tol"],
     )
     try:
@@ -415,6 +456,11 @@ def parse_solver_line(solver_line):
             gf_settle=options["gf_settle"],
             gf_settle_ratio=options["gf_settle_ratio"],
             gf_settle_retry=options["gf_settle_retry"],
+            gf_prune_tol=options["gf_prune_tol"],
+            gf_first_shell_tol=options["gf_first_shell_tol"],
+            gf_refine_rounds=options["gf_refine_rounds"],
+            gf_refine_tol=options["gf_refine_tol"],
+            gf_refine_swap=options["gf_refine_swap"],
             gf_tol=options["gf_tol"],
             gf_real_tol=options["gf_real_tol"],
             gf_min_weight=options["gf_min_weight"],
@@ -448,6 +494,13 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         "gf_settle": solver.gf_settle,
         "gf_settle_ratio": solver.gf_settle_ratio,
         "gf_settle_retry": solver.gf_settle_retry,
+        # None = pruning 1e-3 / refinement 3 rounds / the knob or default for the rest; 0 = off. Stored as given, and
+        # an archive without the keys reads back as off, which is what those runs did.
+        "gf_prune_tol": solver.gf_prune_tol,
+        "gf_first_shell_tol": solver.gf_first_shell_tol,
+        "gf_refine_rounds": solver.gf_refine_rounds,
+        "gf_refine_tol": solver.gf_refine_tol,
+        "gf_refine_swap": solver.gf_refine_swap,
         # None = impurityModel's default (GF_TOL / GF_REAL_TOL knobs, else max(slater_min^2, 1e-9)).
         "gf_tol": solver.gf_tol,
         "gf_real_tol": solver.gf_real_tol,
@@ -460,6 +513,8 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         "slater_min": basis.slater_weight_min,
         "mv": None if basis.mixed_valence is None else basis.mixed_valence[0],
         "excitation_budget": basis.excitation_budget,
+        # None = off.
+        "cost_budget": basis.cost_budget,
         # None = impurityModel's default (GS_E_PT2_TOL); stored as requested, so an archive read
         # back resolves it the same way the run did.
         "e_pt2_tol": basis.e_pt2_tol,
@@ -492,6 +547,12 @@ _SETTINGS_LABELS = (
     ("gf_settle", "GF support settle"),
     ("gf_settle_ratio", "GF settle ratio (x slater_min)"),
     ("gf_settle_retry", "GF settle retry"),
+    ("gf_prune_tol", "GF pruned growth threshold"),
+    ("gf_first_shell_tol", "GF first-shell threshold"),
+    ("gf_refine_rounds", "GF swap refinement rounds"),
+    ("gf_refine_tol", "GF refinement stop (x max|G|)"),
+    ("gf_refine_swap", "GF refinement swap fraction"),
+    ("cost_budget", "Hopping-cost budget"),
     ("gf_tol", "GF convergence tolerance"),
     ("gf_real_tol", "GF real-axis tolerance"),
     ("gf_min_weight", "GF minimal thermal weight"),
@@ -534,6 +595,18 @@ def format_settings_header(nominal_occ, fit_options, basis, solver, n_baths=None
         attrs["gf_settle_retry"] = "off"
     elif isinstance(attrs.get("gf_settle_retry"), bool):
         attrs["gf_settle_retry"] = "on" if attrs["gf_settle_retry"] else "off"
+    for key, default in (
+        ("gf_prune_tol", "default (1e-3)"),
+        ("gf_first_shell_tol", "whole shell"),
+        ("gf_refine_rounds", "default (3)"),
+        ("gf_refine_tol", "default"),
+        ("gf_refine_swap", "default"),
+        ("cost_budget", "off"),
+    ):
+        if key in attrs and attrs[key] is None:
+            attrs[key] = default
+        elif key in ("gf_prune_tol", "gf_refine_rounds") and attrs.get(key) == 0:
+            attrs[key] = "off"
     for key in ("gf_tol", "gf_real_tol"):
         if attrs.get(key, "") is None:
             attrs[key] = "default"
