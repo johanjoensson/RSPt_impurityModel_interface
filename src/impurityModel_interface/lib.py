@@ -68,6 +68,7 @@ try:
     # impurityModel.ed.* is internal.
     from impurityModel.api import (
         BasisOptions,
+        CapLedger,
         DoubleCountingUnreachable,
         ImpurityModel,
         Meshes,
@@ -807,6 +808,32 @@ def _double_counting_sector(hdf5_filename, label, comm):
     return None if sector is None else int(sector)
 
 
+def _double_counting_cap(hdf5_filename, label, comm):
+    """The auto determinant cap the double-counting search resolved, for the current iteration.
+
+    An auto cap is sized from the memory that is free *now*, so without this the DC search and the
+    self-energy it feeds, made as separate calls a moment apart, would run at different caps. Written by
+    the ``rspt_dc_flag=1`` call next to ``"DC ground state sector"`` and read back by the
+    ``rspt_dc_flag=0`` one, which uses it as a ceiling on its own auto cap (it can only lower it; a cap
+    set in the solver line is never touched). ``None`` when no DC search recorded one.
+
+    Read on rank 0 and broadcast, like the sector: ranks that disagree on the cap build different bases.
+    """
+    cap = None
+    if comm is None or comm.rank == 0:
+        try:
+            with h5.File(hdf5_filename, "r") as f:
+                it = int(f.attrs.get("last iteration", 1))
+                group_name = f"{label.strip()} {it}"
+                if group_name in f:
+                    cap = f[group_name].attrs.get("DC ground state cap", None)
+        except (OSError, KeyError):
+            cap = None
+    if comm is not None:
+        cap = comm.bcast(cap, root=0)
+    return None if cap is None else int(cap)
+
+
 def _split_total_over_groups(total, nominal_occ):
     """Distribute an impurity charge ``total`` over the groups of ``nominal_occ``.
 
@@ -1233,7 +1260,10 @@ def _solve(
     if any(n0 > n_orb for n0 in nominal_occ.values()) or any(n0 < 0 for n0 in nominal_occ.values()):
         raise RuntimeError(f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]")
 
+    cap_ledger = CapLedger()
     if dc_flag != 1:
+        # The cap the DC search of this iteration solved at bounds this solve's auto cap.
+        cap_ledger = CapLedger(ceiling=_double_counting_cap(hdf5_filename, label, comm))
         # Seed the ground-state search with the charge sector the double-counting search settled
         # on for this same iteration. The DC is only meaningful if this solve lands on the state
         # the DC was measured against, and the sector walk is the one step that can legitimately
@@ -1409,6 +1439,7 @@ def _solve(
                     initial_step=bandwidth / 100,
                     max_shift=bandwidth,
                     return_sector=True,
+                    cap_ledger=cap_ledger,
                 )
             elif dc_mode == "gap":
                 dc_cf, dc_sector = fixed_gap_dc(
@@ -1421,6 +1452,7 @@ def _solve(
                     de2_min=dc_de2_min,
                     e_pt2_tol=dc_e_pt2_tol,
                     return_sector=True,
+                    cap_ledger=cap_ledger,
                 )
             elif dc_mode == "peak":
                 dc_cf, dc_sector = fixed_peak_dc(
@@ -1433,6 +1465,7 @@ def _solve(
                     de2_min=dc_de2_min,
                     e_pt2_tol=dc_e_pt2_tol,
                     return_sector=True,
+                    cap_ledger=cap_ledger,
                 )
             elif dc_mode == "fll":
                 dc_cf = fll_dc(model, tau=tau)
@@ -1479,6 +1512,8 @@ def _solve(
                     h5_write_dataset(cluster_g, "DC damped", damped_dc_cf)
                     if dc_sector is not None:
                         cluster_g.attrs["DC ground state sector"] = int(dc_sector)
+                    if cap_ledger.resolved is not None:
+                        cluster_g.attrs["DC ground state cap"] = int(cap_ledger.resolved)
             # A second record, in the same format and through the same formatter, for the one
             # number the criterion could not report: it printed the dc it *converged*, and what
             # RSPt receives is that value damped toward the previous iteration's answer. A reader
@@ -1547,6 +1582,7 @@ def _solve(
                 comm=comm,
                 verbosity=verbosity,
                 cluster_label=label.strip(),
+                cap_ledger=cap_ledger,
             )
             if comm.rank == 0:
                 # calc_selfenergy returns everything in its input (CF) basis,

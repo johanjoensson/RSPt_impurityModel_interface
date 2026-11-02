@@ -19,6 +19,7 @@ import h5py as h5  # noqa: E402
 from mpi4py import MPI  # noqa: F401,E402
 
 from impurityModel_interface.lib import (  # noqa: E402
+    _double_counting_cap,
     _double_counting_sector,
     _previous_damped_dc,
     _split_total_over_groups,
@@ -109,6 +110,24 @@ def test_the_sector_is_read_back_for_the_current_iteration(tmp_path):
         f.create_group(f"{LABEL} 2").attrs["DC ground state sector"] = 7
         f.create_group(f"{LABEL} 3").attrs["DC ground state sector"] = 9
     assert _double_counting_sector(path, LABEL, None) == 9
+
+
+def test_the_dc_cap_is_read_back_for_the_current_iteration_only(tmp_path):
+    """P10: the DC pass records the auto cap it solved at; the self-energy pass of the *same* iteration
+    reads it as a ceiling. A previous iteration's cap, or none, yields ``None`` (no ceiling)."""
+    path = tmp_path / "archive.h5"
+    with h5.File(path, "w") as f:
+        f.attrs["last iteration"] = 3
+        f.create_group(f"{LABEL} 2").attrs["DC ground state cap"] = 111
+        f.create_group(f"{LABEL} 3")
+    assert _double_counting_cap(path, LABEL, None) is None
+    with h5.File(path, "a") as f:
+        f[f"{LABEL} 3"].attrs["DC ground state cap"] = 222
+    assert _double_counting_cap(path, LABEL, None) == 222
+
+
+def test_the_dc_cap_survives_a_missing_archive(tmp_path):
+    assert _double_counting_cap(tmp_path / "absent.h5", LABEL, None) is None
 
 
 @pytest.mark.parametrize(
