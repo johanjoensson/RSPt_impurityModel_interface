@@ -251,6 +251,7 @@ def parse_solver_line(solver_line):
         "weight_function": "unit",
         "weight": 2,
         "weight_w0": 0.0,
+        "symm_prec": 1e-6,
         "bath_geometry": "peeled",
         "occ_cutoff": 1e-6,
         "dN": None,
@@ -320,6 +321,9 @@ def parse_solver_line(solver_line):
                 skip_next = True
             elif arg.lower() == "weight_w0":
                 options["weight_w0"] = float(solver_array[i + 1])
+                skip_next = True
+            elif arg.lower() == "symm_prec":
+                options["symm_prec"] = float(solver_array[i + 1])
                 skip_next = True
             elif arg.lower() == "gamma":
                 options["gamma"] = float(solver_array[i + 1])
@@ -421,6 +425,7 @@ def parse_solver_line(solver_line):
             "weight_function",
             "weight",
             "weight_w0",
+            "symm_prec",
             "fit_unocc",
             "freeze_bath_energies",
             "warm_start",
@@ -1321,6 +1326,7 @@ def _solve(
         gamma=fit_options["gamma"],
         weight_function=fit_options["weight_function"],
         weight_w0=fit_options["weight_w0"],
+        symm_prec=fit_options["symm_prec"],
         exp_weight=fit_options["weight"],
         imag_only=False,
         valence_bath_only=not fit_options["fit_unocc"],
@@ -1750,6 +1756,7 @@ def get_ed_h0(
     exp_weight=2,
     weight_function="unit",
     weight_w0=0,
+    symm_prec=1e-6,
     imag_only=False,
     valence_bath_only=True,
     bath_geometry="peeled_linked_chain",
@@ -1800,7 +1807,7 @@ def get_ed_h0(
     # rspt2spectra block-diagonalizes the hybridization function, rotates the
     # local hamiltonian into the same (fitting) basis and builds the block
     # partition from the union of both connectivities.
-    Q, phase_hyb, H_local_Q, block_structure = prepare_hyb_fit(hyb, H_dft, tol=1e-6, verbose=verbose, w=w)
+    Q, phase_hyb, H_local_Q, block_structure = prepare_hyb_fit(hyb, H_dft, tol=symm_prec, verbose=verbose, w=w)
 
     # Fingerprint of the hybridization function, used to decide whether a
     # stored bath fit can be reused (identical hybridization) or the fit has
