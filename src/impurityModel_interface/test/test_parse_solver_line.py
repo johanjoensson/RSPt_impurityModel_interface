@@ -106,7 +106,7 @@ def test_full_option_line():
     assert basis.truncation_threshold == int(1e7)
     assert basis.slater_weight_min == pytest.approx(1e-8)
     assert basis.dN == 2
-    assert basis.mixed_valence == {0: 1}
+    assert basis.mixed_valence == 1
     # No dense_green token, so the sparse Green's function path is the default
     assert solver.sparse_green is True
     assert basis.chain_restrict is False
@@ -551,3 +551,17 @@ def test_every_new_archive_key_is_the_name_impurityModel_reads(key):
     _occ, _n, fit_options, basis, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
     assert key in solver_line_attrs(fit_options, basis, solver)
     assert f'"{key}"' in inspect.getsource(model._read_archive_group)
+
+
+@pytest.mark.parametrize("token, expected", [("auto", "auto"), ("ON", "on"), ("false", "off"), ("0", 0), ("2", 2)])
+def test_mv_token_accepts_the_tristate_words_and_legacy_integers(token, expected):
+    from impurityModel_interface.lib import _parse_mv
+
+    assert _parse_mv(token) == expected
+
+
+def test_mv_token_rejects_nonsense():
+    from impurityModel_interface.lib import _parse_mv
+
+    with pytest.raises(ValueError, match="mv"):
+        _parse_mv("maybe")

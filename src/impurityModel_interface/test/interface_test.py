@@ -80,7 +80,7 @@ def test_selfenergy_against_reference():
     dN = options["dN"]
     dN = None if isinstance(dN, str) else int(dN)
     mv = options["mv"]
-    mixed_valence = None if isinstance(mv, str) else {0: int(mv)}
+    mixed_valence = mv
 
     h_op = matrixToIOp(data["H_solver"])
     results = calc_selfenergy(

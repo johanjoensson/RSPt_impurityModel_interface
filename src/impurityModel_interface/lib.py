@@ -104,6 +104,18 @@ except ImportError as import_error:
     ) from import_error
 
 
+def _parse_mv(token):
+    """``mv`` token: ``auto``/``on``/``off`` (also true/false), or a legacy integer kept as an int."""
+    word = token.strip().lower()
+    word = {"true": "on", "false": "off"}.get(word, word)
+    if word in ("auto", "on", "off"):
+        return word
+    try:
+        return int(word)
+    except ValueError:
+        raise ValueError(f"mv: expected auto, on, off or an integer, got {token!r}") from None
+
+
 def parse_solver_line(solver_line):
     """
     Parse the RSPt solver line for the impurityModel ED solver.
@@ -154,8 +166,10 @@ def parse_solver_line(solver_line):
                                               GS_E_PT2_TOL, 1e-8). The double-counting search
                                               inherits it unless its own line sets 'e_pt2'.
       dn N                                 -- Allowed impurity occupation window (+-dN).
-      mv N                                 -- Mixed valence scalar, forwarded per group to
-                                              impurityModel's Basis (see impurityModel docs).
+      mv auto|on|off                       -- Charge-sector ensemble (grand-canonical multi-sector) switch,
+                                              forwarded to impurityModel's Basis. Unset = the driver's
+                                              default ('auto' for Sigma and double counting). A legacy
+                                              integer is accepted (0 = off, non-zero = on).
       dense_green                          -- Use the dense block-Lanczos Green's function path.
       gf_method lanczos|bicgstab           -- Green's function kernel (default lanczos): one block-Lanczos
                                               recurrence per work unit serving the whole frequency mesh, or
@@ -361,7 +375,7 @@ def parse_solver_line(solver_line):
                 options["dN"] = int(solver_array[i + 1])
                 skip_next = True
             elif arg.lower() == "mv":
-                options["mv"] = int(solver_array[i + 1])
+                options["mv"] = _parse_mv(solver_array[i + 1])
                 skip_next = True
             elif arg.lower() == "dense_green":
                 options["sparse_green"] = False
@@ -442,7 +456,7 @@ def parse_solver_line(solver_line):
         )
     basis = BasisOptions(
         nominal_occ={0: nominal_occ},
-        mixed_valence=None if options["mv"] is None else {0: options["mv"]},
+        mixed_valence=options["mv"],
         dN=options["dN"],
         truncation_threshold=options["truncation_threshold"],
         chain_restrict=options["chain_restrict"],
@@ -517,7 +531,7 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         "dN": basis.dN,
         "truncation_threshold": basis.truncation_threshold,
         "slater_min": basis.slater_weight_min,
-        "mv": None if basis.mixed_valence is None else basis.mixed_valence[0],
+        "mv": None if basis.mixed_valence is None else basis.mixed_valence,
         "excitation_budget": basis.excitation_budget,
         # None = off.
         "cost_budget": basis.cost_budget,
