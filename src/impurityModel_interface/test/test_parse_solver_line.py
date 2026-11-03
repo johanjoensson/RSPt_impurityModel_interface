@@ -165,7 +165,8 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["gf_tol"] is None and attrs["gf_real_tol"] is None and attrs["gf_min_weight"] is None
     assert attrs["gf_settle"] is None and attrs["gf_settle_ratio"] is None and attrs["gf_settle_retry"] is None
     assert attrs["gf_prune_tol"] is None and attrs["gf_refine_rounds"] is None and attrs["cost_budget"] is None
-    assert len(attrs) == 35
+    assert attrs["symm_prec"] == pytest.approx(1e-6)  # d9fbbef: the symmetry-detection tolerance is archived too
+    assert len(attrs) == 36
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
