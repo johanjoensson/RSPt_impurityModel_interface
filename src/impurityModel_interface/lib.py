@@ -172,7 +172,7 @@ def parse_solver_line(solver_line):
       mv auto|on|off                       -- Charge-sector ensemble (grand-canonical multi-sector) switch,
                                               forwarded to impurityModel's Basis. Unset = the driver's
                                               default ('auto' for Sigma and double counting). A legacy
-                                              integer is accepted (0 = off, non-zero = on).
+                                              integer is accepted (0 = off, non-zero = auto).
       dense_green                          -- Use the dense block-Lanczos Green's function path.
       gf_method lanczos|bicgstab           -- Green's function kernel (default lanczos): one block-Lanczos
                                               recurrence per work unit serving the whole frequency mesh, or
