@@ -566,3 +566,15 @@ def test_mv_token_rejects_nonsense():
 
     with pytest.raises(ValueError, match="mv"):
         _parse_mv("maybe")
+
+
+def test_settings_header_names_an_unset_mv_as_the_driver_default():
+    n0, n_baths, fit_options, basis, solver = parse_solver_line("3 3 8 chain full")
+    header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths)
+    rows = {label.strip(): value for label, value in (line.split(" |> ") for line in header.strip().splitlines())}
+    assert rows["Mixed valence"] == "auto (default)"
+
+
+def test_a_negative_legacy_mv_is_rejected():
+    with pytest.raises(ValueError, match="mv"):
+        parse_solver_line("3 3 8 chain full mv -1")

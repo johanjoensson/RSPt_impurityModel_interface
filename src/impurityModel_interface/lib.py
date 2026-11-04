@@ -111,9 +111,12 @@ def _parse_mv(token):
     if word in ("auto", "on", "off"):
         return word
     try:
-        return int(word)
+        value = int(word)
     except ValueError:
         raise ValueError(f"mv: expected auto, on, off or an integer, got {token!r}") from None
+    if value < 0:
+        raise ValueError(f"mv: a legacy integer must be >= 0 (0 = off), got {token!r}")
+    return value
 
 
 def parse_solver_line(solver_line):
@@ -603,6 +606,9 @@ def format_settings_header(nominal_occ, fit_options, basis, solver, n_baths=None
     # Unspecified policy/threshold are printed in the words the solver line takes, not as Python's None.
     if attrs.get("gf_admission", "") is None:
         attrs["gf_admission"] = "auto"
+    if attrs.get("mv", "") is None:
+        # Unset: the self-energy/DC driver's default, which is "auto" (not Python's None).
+        attrs["mv"] = "auto (default)"
     if attrs.get("gf_admit_tol", "") is None:
         attrs["gf_admit_tol"] = "default" if attrs.get("gf_admission") == "outer" else "n/a"
     if attrs.get("gf_settle", "") is None:
