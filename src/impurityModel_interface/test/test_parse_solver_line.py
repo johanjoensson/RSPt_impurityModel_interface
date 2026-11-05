@@ -24,10 +24,9 @@ from impurityModel_interface.lib import (
 
 
 def test_minimal_line():
-    n0, n_baths, fit_options, basis, _solver = parse_solver_line("8 10 2")
+    n0, n_baths, fit_options, basis, _solver = parse_solver_line("8 10")
     assert n0 == 8
     assert n_baths == 10
-    assert basis.excitation_budget == 2
     # peeled_linked_chain is the default geometry; it keeps chain restrictions and the
     # star-only defaults (collapse_chains, dN) do not kick in.
     assert fit_options["bath_geometry"] == "peeled"
@@ -40,23 +39,23 @@ def test_minimal_line():
 
 
 def test_freeze_bath_energies_is_off_by_default_and_opt_in():
-    _, _, fit_options, _, _ = parse_solver_line("8 10 4 peeled")
+    _, _, fit_options, _, _ = parse_solver_line("8 10 peeled")
     assert fit_options["freeze_bath_energies"] is False
-    _, _, fit_options, _, _ = parse_solver_line("8 10 4 peeled freeze_bath_energies")
+    _, _, fit_options, _, _ = parse_solver_line("8 10 peeled freeze_bath_energies")
     assert fit_options["freeze_bath_energies"] is True
 
 
 def test_warm_start_is_on_by_default_with_a_five_percent_margin():
-    _, _, fit_options, _, _ = parse_solver_line("8 10 4 peeled")
+    _, _, fit_options, _, _ = parse_solver_line("8 10 peeled")
     assert fit_options["warm_start"] is True
     assert fit_options["warm_tol"] == pytest.approx(0.05)
 
 
 def test_cold_fit_and_warm_tol_parse():
-    _, _, fit_options, _, _ = parse_solver_line("8 10 4 peeled COLD_FIT gamma 0.1")
+    _, _, fit_options, _, _ = parse_solver_line("8 10 peeled COLD_FIT gamma 0.1")
     assert fit_options["warm_start"] is False
     assert fit_options["gamma"] == pytest.approx(0.1)
-    _, _, fit_options, _, _ = parse_solver_line("8 10 4 warm_tol 0.2 peeled")
+    _, _, fit_options, _, _ = parse_solver_line("8 10 warm_tol 0.2 peeled")
     assert fit_options["warm_start"] is True
     assert fit_options["warm_tol"] == pytest.approx(0.2)
     assert fit_options["bath_geometry"] == "peeled_linked_chain"
@@ -65,22 +64,21 @@ def test_cold_fit_and_warm_tol_parse():
 @pytest.mark.parametrize("value", ["-0.1", "1.5"])
 def test_warm_tol_must_be_a_fraction(value):
     with pytest.raises(AssertionError, match="warm_tol"):
-        parse_solver_line(f"8 10 4 warm_tol {value}")
+        parse_solver_line(f"8 10 warm_tol {value}")
 
 
 def test_cold_fit_contradicts_freezing():
     with pytest.raises(RuntimeError, match="contradict"):
-        parse_solver_line("8 10 4 freeze_bath_energies cold_fit")
+        parse_solver_line("8 10 freeze_bath_energies cold_fit")
 
 
 @pytest.mark.parametrize("comment_char", ["!", "#"])
 def test_comments_are_stripped(comment_char):
     n0, n_baths, fit_options, basis, _solver = parse_solver_line(
-        f"8 10 4 {comment_char} chain gamma 0.5 trailing comment"
+        f"8 10 {comment_char} chain gamma 0.5 trailing comment"
     )
     assert n0 == 8
     assert n_baths == 10
-    assert basis.excitation_budget == 4
     # Everything after the comment char is stripped, so the geometry stays at its default.
     assert fit_options["bath_geometry"] == "peeled"
     assert fit_options["gamma"] == 0.01
@@ -88,14 +86,13 @@ def test_comments_are_stripped(comment_char):
 
 def test_full_option_line():
     line = (
-        "8 10 4 linked_chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 "
+        "8 10 linked_chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 "
         "weight_w0 -1.5 spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 "
         "slater_min 1e-8 dn 2 no_mv no_chain_restrict fit_unocc"
     )
     n0, n_baths, fit_options, basis, solver = parse_solver_line(line)
     assert n0 == 8
     assert n_baths == 10
-    assert basis.excitation_budget == 4
     assert fit_options["bath_geometry"] == "linked_chain"
     assert solver.dense_cutoff == 500
     assert fit_options["gamma"] == pytest.approx(0.1)
@@ -116,18 +113,18 @@ def test_full_option_line():
 @pytest.mark.parametrize("token", ["pro", "partial", "selective", "full", "periodic"])
 def test_retired_reort_tokens_still_parse_and_warn(token, capsys):
     """Existing green.inp files carry a reorthogonalization token; it is accepted, ignored and announced."""
-    *_, solver = parse_solver_line(f"8 10 4 chain {token}")
+    *_, solver = parse_solver_line(f"8 10 chain {token}")
     assert not hasattr(solver, "reort")
     assert f"'{token}' is retired" in capsys.readouterr().out
 
 
 def test_the_none_token_is_silent(capsys):
-    parse_solver_line("8 10 4 chain none")
+    parse_solver_line("8 10 chain none")
     assert "retired" not in capsys.readouterr().out
 
 
 def test_chain_keeps_chain_restrict():
-    _, _, fit_options, basis, _solver = parse_solver_line("8 10 4 chain")
+    _, _, fit_options, basis, _solver = parse_solver_line("8 10 chain")
     assert fit_options["bath_geometry"] == "chain"
     assert basis.chain_restrict is True
     assert basis.dN is None
@@ -136,7 +133,7 @@ def test_chain_keeps_chain_restrict():
 def test_solver_line_attrs_reproduces_the_flat_record():
     # The parsed groups round-trip to the flat attribute record the HDF5 archive stores.
     _, _, fit_options, basis, solver = parse_solver_line(
-        "8 10 4 chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 weight_w0 -1.5 "
+        "8 10 chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 weight_w0 -1.5 "
         "spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 slater_min 1e-8 dn 2 no_mv "
         "dense_green no_chain_restrict fit_unocc"
     )
@@ -158,7 +155,6 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["freeze_bath_energies"] is False
     assert attrs["warm_start"] is True
     assert attrs["warm_tol"] == pytest.approx(0.05)
-    assert attrs["excitation_budget"] == 4
     assert attrs["gf_method"] == "lanczos"
     assert attrs["e_pt2_tol"] is None
     assert attrs["gf_admission"] is None and attrs["gf_admit_tol"] is None
@@ -166,32 +162,41 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["gf_settle"] is None and attrs["gf_settle_ratio"] is None and attrs["gf_settle_retry"] is None
     assert attrs["gf_prune_tol"] is None and attrs["gf_refine_rounds"] is None and attrs["cost_budget"] is None
     assert attrs["symm_prec"] == pytest.approx(1e-6)  # d9fbbef: the symmetry-detection tolerance is archived too
-    assert len(attrs) == 36
+    assert len(attrs) == 35
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
 
-def test_excitation_budget_is_archived():
-    """The budget is the third mandatory solver-line token; without it in the archive an offline
-    rerun silently falls back to impurityModel's default and solves a different problem."""
-    _, n_baths, fit_options, basis, solver = parse_solver_line("3 3 8 peeled")
+def test_n_baths_is_archived_when_given():
+    _, n_baths, fit_options, basis, solver = parse_solver_line("3 3 peeled")
     attrs = solver_line_attrs(fit_options, basis, solver, n_baths=n_baths)
-    assert attrs["excitation_budget"] == 8
     assert attrs["n_baths"] == 3
+    assert "excitation_budget" not in attrs
 
 
-def test_negative_excitation_budget_disables_it(capsys):
-    """A negative budget disables the budget (with a notice) instead of building an empty window;
-    the archive then stores it as None, which impurityModel's reader reads back as disabled."""
-    _, n_baths, fit_options, basis, solver = parse_solver_line("3 3 -1 peeled")
-    assert "is negative: the excitation budget is disabled" in capsys.readouterr().out
-    assert basis.excitation_budget is None
-    assert solver_line_attrs(fit_options, basis, solver, n_baths=n_baths)["excitation_budget"] is None
+def test_the_old_three_integer_grammar_is_rejected_with_the_fixed_line():
+    """'N0 nBaths excitation_budget [options]' was the old grammar; a leftover budget token must not be taken
+    for an option (or silently dropped), it must name the line to write instead."""
+    for line in ("8 10 6 peeled", "3 3 -1 peeled", "8 10 4"):
+        with pytest.raises(RuntimeError, match="excitation budget of the old grammar"):
+            parse_solver_line(line)
+    with pytest.raises(RuntimeError, match=r"Delete the token: '8 10 peeled'"):
+        parse_solver_line("8 10 6 peeled")
+
+
+def test_option_directly_after_the_two_integers_is_parsed():
+    _, _, fit_options, _, _ = parse_solver_line("8 10 chain")
+    assert fit_options["bath_geometry"] == "chain"
+
+
+def test_fewer_than_two_tokens_is_an_error():
+    with pytest.raises(RuntimeError, match="at least 2 arguments"):
+        parse_solver_line("8")
 
 
 def test_settings_header_lists_every_archived_setting():
     n0, n_baths, fit_options, basis, solver = parse_solver_line(
-        "3 3 8 chain full gamma 0.1 gaussian dn 2 no_mv dense_green"
+        "3 3 chain full gamma 0.1 gaussian dn 2 no_mv dense_green"
     )
     header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths, tau=0.025, delta=0.01)
     rows = dict(line.split(" |> ") for line in header.strip().splitlines())
@@ -200,7 +205,6 @@ def test_settings_header_lists_every_archived_setting():
     # One row per archived setting, plus the nominal occupation, tau and the broadening.
     assert len(rows) == len(attrs) + 3
     assert rows["Nominal imp. occupation"] == "3"
-    assert rows["Excitation budget"] == "8"
     assert rows["Bath states per imp. orb."] == "3"
     assert rows["Fit regularization gamma"] == "0.1"
     assert rows["Sparse Green's function"] == "False"
@@ -215,19 +219,19 @@ def test_settings_header_lists_every_archived_setting():
 def test_truncation_threshold_takes_the_shared_vocabulary(written, expected):
     """auto | unlimited (inf) | a positive integer, as on the CLI and in TOML. `inf` used to raise
     OverflowError here and `auto` a ValueError."""
-    _, _, _, basis, _ = parse_solver_line(f"3 3 8 chain full truncation_threshold {written}")
+    _, _, _, basis, _ = parse_solver_line(f"3 3 chain full truncation_threshold {written}")
     assert basis.truncation_threshold == expected
 
 
 @pytest.mark.parametrize("written", ["0", "-10", "1.5", "lots"])
 def test_truncation_threshold_rejects_nonsense(written):
     with pytest.raises(ValueError):
-        parse_solver_line(f"3 3 8 chain full truncation_threshold {written}")
+        parse_solver_line(f"3 3 chain full truncation_threshold {written}")
 
 
 @pytest.mark.parametrize("written, shown", [("auto", "auto"), ("unlimited", "unlimited"), ("2000", "2,000 (final)")])
 def test_settings_header_names_the_cap_in_the_solver_line_words(written, shown):
-    n0, n_baths, fit_options, basis, solver = parse_solver_line(f"3 3 8 chain full truncation_threshold {written}")
+    n0, n_baths, fit_options, basis, solver = parse_solver_line(f"3 3 chain full truncation_threshold {written}")
     header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths)
     rows = {label.strip(): value for label, value in (line.split(" |> ") for line in header.strip().splitlines())}
     assert rows["Determinant cap (truncation_threshold)"] == shown
@@ -235,17 +239,17 @@ def test_settings_header_names_the_cap_in_the_solver_line_words(written, shown):
 
 def test_unknown_argument_raises():
     with pytest.raises(RuntimeError, match="Unknown solver parameter"):
-        parse_solver_line("8 10 4 bogus_option")
+        parse_solver_line("8 10 bogus_option")
 
 
 def test_single_argument_raises():
-    with pytest.raises(AssertionError):
+    with pytest.raises(RuntimeError):
         parse_solver_line("8")
 
 
-def test_two_arguments_raises():
-    with pytest.raises(AssertionError):
-        parse_solver_line("8 10")
+def test_two_arguments_are_enough():
+    n0, n_baths, *_ = parse_solver_line("8 10")
+    assert (n0, n_baths) == (8, 10)
 
 
 def test_non_integer_arguments_raise():
@@ -321,19 +325,19 @@ def test_h5_write_dataset_overwrites(tmp_path):
 def test_spin_flip_dj_is_accepted_and_ignored():
     """An existing green.inp may still carry the token; it must parse to the same options as the
     line without it, since the option it named never had an effect and no longer exists."""
-    with_token = parse_solver_line("8 10 4 chain spin_flip_dj occ_cutoff 1e-4")
-    without = parse_solver_line("8 10 4 chain occ_cutoff 1e-4")
+    with_token = parse_solver_line("8 10 chain spin_flip_dj occ_cutoff 1e-4")
+    without = parse_solver_line("8 10 chain occ_cutoff 1e-4")
     assert with_token == without
 
 
 def test_e_pt2_is_unset_by_default_so_impurity_model_uses_its_own():
-    _, _, _, basis, _ = parse_solver_line("8 10 4 peeled")
+    _, _, _, basis, _ = parse_solver_line("8 10 peeled")
     assert basis.e_pt2_tol is None
 
 
 @pytest.mark.parametrize("spelling", ["e_pt2", "E_PT2", "e_pt2_tol"])
 def test_e_pt2_sets_the_ground_state_tolerance(spelling):
-    _, _, _, basis, _ = parse_solver_line(f"8 10 4 peeled {spelling} 1e-6 slater_min 0")
+    _, _, _, basis, _ = parse_solver_line(f"8 10 peeled {spelling} 1e-6 slater_min 0")
     assert basis.e_pt2_tol == 1e-6
     assert basis.slater_weight_min == 0.0, "the next token must still parse"
 
@@ -341,11 +345,11 @@ def test_e_pt2_sets_the_ground_state_tolerance(spelling):
 @pytest.mark.parametrize("tail", ["e_pt2", "e_pt2 0", "e_pt2 -1e-8"])
 def test_e_pt2_needs_a_positive_value(tail):
     with pytest.raises(AssertionError, match="e_pt2"):
-        parse_solver_line(f"8 10 4 peeled {tail}")
+        parse_solver_line(f"8 10 peeled {tail}")
 
 
 def test_e_pt2_is_archived_and_printed():
-    n0, n_baths, fit_options, basis, solver = parse_solver_line("8 10 4 peeled e_pt2 1e-6")
+    n0, n_baths, fit_options, basis, solver = parse_solver_line("8 10 peeled e_pt2 1e-6")
     assert solver_line_attrs(fit_options, basis, solver)["e_pt2_tol"] == 1e-6
     header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths)
     assert "GS residual PT2 tolerance" in header and "1e-06" in header
@@ -355,18 +359,18 @@ def test_e_pt2_is_archived_and_printed():
 
 
 def test_the_kernel_and_policy_are_unspecified_by_default_so_existing_lines_run_as_before():
-    _, _, _, _, solver = parse_solver_line("8 10 4 peeled")
+    _, _, _, _, solver = parse_solver_line("8 10 peeled")
     assert (solver.gf_method, solver.gf_admission, solver.gf_admit_tol) == ("lanczos", None, None)
 
 
 def test_gf_method_selects_the_kernel():
-    _, _, _, _, solver = parse_solver_line("8 10 4 peeled gf_method bicgstab")
+    _, _, _, _, solver = parse_solver_line("8 10 peeled gf_method bicgstab")
     assert solver.gf_method == "bicgstab"
 
 
 def test_outer_admission_with_a_threshold_is_parsed_and_the_next_token_still_parses():
     _, _, _, basis, solver = parse_solver_line(
-        "8 10 4 peeled gf_method bicgstab gf_admission outer gf_admit_tol 1e-5 slater_min 0"
+        "8 10 peeled gf_method bicgstab gf_admission outer gf_admit_tol 1e-5 slater_min 0"
     )
     assert (solver.gf_method, solver.gf_admission, solver.gf_admit_tol) == ("bicgstab", "outer", 1e-5)
     assert basis.slater_weight_min == 0.0, "the token after gf_admit_tol must still parse"
@@ -374,12 +378,12 @@ def test_outer_admission_with_a_threshold_is_parsed_and_the_next_token_still_par
 
 @pytest.mark.parametrize("spelling", ["GF_ADMISSION OUTER", "gf_admission Outer", "gf_admission outer"])
 def test_the_keywords_and_values_are_case_insensitive(spelling):
-    _, _, _, _, solver = parse_solver_line(f"8 10 4 peeled GF_METHOD BiCGStab {spelling}")
+    _, _, _, _, solver = parse_solver_line(f"8 10 peeled GF_METHOD BiCGStab {spelling}")
     assert (solver.gf_method, solver.gf_admission) == ("bicgstab", "outer")
 
 
 def test_auto_admission_means_not_specified():
-    _, _, _, _, solver = parse_solver_line("8 10 4 peeled gf_method bicgstab gf_admission auto")
+    _, _, _, _, solver = parse_solver_line("8 10 peeled gf_method bicgstab gf_admission auto")
     assert solver.gf_admission is None
 
 
@@ -397,24 +401,24 @@ def test_auto_admission_means_not_specified():
 def test_a_contradictory_or_unknown_setting_is_refused_at_parse_time(tail, message):
     """Before any solve: a mistake on the line must not surface minutes into a run."""
     with pytest.raises(RuntimeError, match=message):
-        parse_solver_line(f"8 10 4 peeled {tail}")
+        parse_solver_line(f"8 10 peeled {tail}")
 
 
 @pytest.mark.parametrize("tail", ["gf_method", "gf_admission", "gf_admit_tol"])
 def test_a_missing_value_is_refused(tail):
     with pytest.raises(AssertionError, match=tail):
-        parse_solver_line(f"8 10 4 peeled {tail}")
+        parse_solver_line(f"8 10 peeled {tail}")
 
 
 @pytest.mark.parametrize("value", ["0", "-1e-4"])
 def test_the_threshold_must_be_positive(value):
     with pytest.raises(AssertionError, match="gf_admit_tol"):
-        parse_solver_line(f"8 10 4 peeled gf_method bicgstab gf_admission outer gf_admit_tol {value}")
+        parse_solver_line(f"8 10 peeled gf_method bicgstab gf_admission outer gf_admit_tol {value}")
 
 
 def test_the_policy_is_archived_and_printed_in_the_words_of_the_line():
     n0, n_baths, fit_options, basis, solver = parse_solver_line(
-        "8 10 4 peeled gf_method bicgstab gf_admission outer gf_admit_tol 1e-5"
+        "8 10 peeled gf_method bicgstab gf_admission outer gf_admit_tol 1e-5"
     )
     attrs = solver_line_attrs(fit_options, basis, solver)
     assert (attrs["gf_method"], attrs["gf_admission"], attrs["gf_admit_tol"]) == ("bicgstab", "outer", 1e-5)
@@ -424,14 +428,14 @@ def test_the_policy_is_archived_and_printed_in_the_words_of_the_line():
 
 
 def test_the_header_prints_an_unspecified_policy_as_auto_not_as_none():
-    n0, _, fit_options, basis, solver = parse_solver_line("8 10 4 peeled")
+    n0, _, fit_options, basis, solver = parse_solver_line("8 10 peeled")
     rows = dict(line.split(" |> ") for line in format_settings_header(n0, fit_options, basis, solver).splitlines())
     rows = {label.strip(): value for label, value in rows.items()}
     assert rows["GF basis admission"] == "auto" and rows["GF admission threshold"] == "n/a"
 
 
 def test_the_gf_tolerances_parse_and_are_archived():
-    _, _, fit_options, basis, solver = parse_solver_line("3 4 8 linked_chain gf_tol 1e-8 gf_real_tol 1e-5 slater_min 0")
+    _, _, fit_options, basis, solver = parse_solver_line("3 4 linked_chain gf_tol 1e-8 gf_real_tol 1e-5 slater_min 0")
     assert (solver.gf_tol, solver.gf_real_tol) == (1e-8, 1e-5)
     assert basis.slater_weight_min == 0.0, "the token after gf_real_tol must still parse"
     attrs = solver_line_attrs(fit_options, basis, solver)
@@ -448,39 +452,39 @@ def test_the_gf_tolerances_parse_and_are_archived():
 )
 def test_a_bad_gf_tolerance_is_refused_at_parse_time(tail, match):
     with pytest.raises(RuntimeError, match=match):
-        parse_solver_line(f"3 4 8 linked_chain {tail}")
+        parse_solver_line(f"3 4 linked_chain {tail}")
 
 
 def test_a_gf_tolerance_without_a_value_is_refused():
     with pytest.raises(AssertionError, match="gf_real_tol"):
-        parse_solver_line("3 4 8 linked_chain gf_real_tol")
+        parse_solver_line("3 4 linked_chain gf_real_tol")
 
 
 def test_the_thermal_weight_cutoff_parses_and_is_archived():
-    _, _, fit_options, basis, solver = parse_solver_line("3 4 8 linked_chain gf_min_weight 1e-3 e_pt2 1e-6")
+    _, _, fit_options, basis, solver = parse_solver_line("3 4 linked_chain gf_min_weight 1e-3 e_pt2 1e-6")
     assert solver.gf_min_weight == 1e-3
     assert basis.e_pt2_tol == 1e-6, "the token after gf_min_weight must still parse"
     assert solver_line_attrs(fit_options, basis, solver)["gf_min_weight"] == 1e-3
     with pytest.raises(RuntimeError, match="gf_min_weight must lie in"):
-        parse_solver_line("3 4 8 linked_chain gf_min_weight 1")
+        parse_solver_line("3 4 linked_chain gf_min_weight 1")
 
 
 def test_the_settle_tokens_reach_the_solver_options_and_the_record():
-    *_head, solver = parse_solver_line("8 10 4 peeled gf_settle off slater_min 0")
+    *_head, solver = parse_solver_line("8 10 peeled gf_settle off slater_min 0")
     assert solver.gf_settle is False and solver.gf_settle_ratio is None
-    *_head, solver = parse_solver_line("8 10 4 peeled gf_settle_ratio 3 slater_min 1e-8")
+    *_head, solver = parse_solver_line("8 10 peeled gf_settle_ratio 3 slater_min 1e-8")
     assert solver.gf_settle is None and solver.gf_settle_ratio == 3.0
-    *_head, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
+    *_head, solver = parse_solver_line("8 10 peeled slater_min 1e-8")
     assert solver.gf_settle is None and solver.gf_settle_ratio is None
 
 
 @pytest.mark.parametrize(
     "line,match",
     [
-        ("8 10 4 peeled gf_settle maybe", "on or off"),
-        ("8 10 4 peeled gf_settle", "needs on or off"),
-        ("8 10 4 peeled gf_settle off gf_settle_ratio 2", "only applies with the support settle on"),
-        ("8 10 4 peeled gf_method bicgstab gf_settle on", "applies only to gf_method='lanczos'"),
+        ("8 10 peeled gf_settle maybe", "on or off"),
+        ("8 10 peeled gf_settle", "needs on or off"),
+        ("8 10 peeled gf_settle off gf_settle_ratio 2", "only applies with the support settle on"),
+        ("8 10 peeled gf_method bicgstab gf_settle on", "applies only to gf_method='lanczos'"),
     ],
 )
 def test_the_settle_tokens_refuse_a_contradiction(line, match):
@@ -489,15 +493,15 @@ def test_the_settle_tokens_refuse_a_contradiction(line, match):
 
 
 def test_the_settle_retry_token():
-    *_head, solver = parse_solver_line("8 10 4 peeled gf_settle_retry off slater_min 1e-8")
+    *_head, solver = parse_solver_line("8 10 peeled gf_settle_retry off slater_min 1e-8")
     assert solver.gf_settle_retry is False
     with pytest.raises((AssertionError, ValueError, RuntimeError), match="contradicts gf_settle off"):
-        parse_solver_line("8 10 4 peeled gf_settle off gf_settle_retry on")
+        parse_solver_line("8 10 peeled gf_settle off gf_settle_retry on")
 
 
 def test_the_pruning_refinement_and_cost_tokens_reach_the_options_and_the_record():
     line = (
-        "8 10 4 peeled gf_prune_tol 1e-4 gf_first_shell_tol 1e-6 gf_refine_rounds 2 gf_refine_tol 0.01 "
+        "8 10 peeled gf_prune_tol 1e-4 gf_first_shell_tol 1e-6 gf_refine_rounds 2 gf_refine_tol 0.01 "
         "gf_refine_swap 0.2 cost_budget 0.5 slater_min 1e-8"
     )
     _occ, _n, fit_options, basis, solver = parse_solver_line(line)
@@ -506,22 +510,22 @@ def test_the_pruning_refinement_and_cost_tokens_reach_the_options_and_the_record
     assert basis.cost_budget == 0.5
     attrs = solver_line_attrs(fit_options, basis, solver)
     assert attrs["gf_prune_tol"] == 1e-4 and attrs["gf_refine_rounds"] == 2 and attrs["cost_budget"] == 0.5
-    *_head, solver = parse_solver_line("8 10 4 peeled gf_prune_tol 0 gf_refine_rounds 0 slater_min 1e-8")
+    *_head, solver = parse_solver_line("8 10 peeled gf_prune_tol 0 gf_refine_rounds 0 slater_min 1e-8")
     assert solver.gf_prune_tol == 0.0 and solver.gf_refine_rounds == 0
-    *_head, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
+    *_head, solver = parse_solver_line("8 10 peeled slater_min 1e-8")
     assert solver.gf_prune_tol is None and solver.gf_refine_rounds is None
 
 
 @pytest.mark.parametrize(
     "line,match",
     [
-        ("8 10 4 peeled gf_prune_tol", "needs a value"),
-        ("8 10 4 peeled gf_refine_rounds two", "invalid literal"),
-        ("8 10 4 peeled gf_prune_tol 1e-3 gf_settle on", "exclusive with the support settle"),
-        ("8 10 4 peeled gf_prune_tol 0 gf_first_shell_tol 1e-3", "pruning is switched off"),
-        ("8 10 4 peeled gf_refine_rounds 0 gf_refine_swap 0.1", "need gf_refine_rounds > 0"),
-        ("8 10 4 peeled gf_refine_swap 0.9", "gf_refine_swap must be in"),
-        ("8 10 4 peeled cost_budget -1", "cost_budget must be positive"),
+        ("8 10 peeled gf_prune_tol", "needs a value"),
+        ("8 10 peeled gf_refine_rounds two", "invalid literal"),
+        ("8 10 peeled gf_prune_tol 1e-3 gf_settle on", "exclusive with the support settle"),
+        ("8 10 peeled gf_prune_tol 0 gf_first_shell_tol 1e-3", "pruning is switched off"),
+        ("8 10 peeled gf_refine_rounds 0 gf_refine_swap 0.1", "need gf_refine_rounds > 0"),
+        ("8 10 peeled gf_refine_swap 0.9", "gf_refine_swap must be in"),
+        ("8 10 peeled cost_budget -1", "cost_budget must be positive"),
     ],
 )
 def test_the_new_tokens_refuse_a_contradiction(line, match):
@@ -530,11 +534,11 @@ def test_the_new_tokens_refuse_a_contradiction(line, match):
 
 
 def test_the_settings_header_names_the_defaults_and_the_explicit_offs():
-    nominal, _n, fit_options, basis, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
+    nominal, _n, fit_options, basis, solver = parse_solver_line("8 10 peeled slater_min 1e-8")
     header = format_settings_header(nominal, fit_options, basis, solver)
     assert "default (1e-3)" in header and "default (3)" in header
     nominal, _n, fit_options, basis, solver = parse_solver_line(
-        "8 10 4 peeled gf_prune_tol 0 gf_refine_rounds 0 slater_min 1e-8"
+        "8 10 peeled gf_prune_tol 0 gf_refine_rounds 0 slater_min 1e-8"
     )
     assert header != format_settings_header(nominal, fit_options, basis, solver)
 
@@ -549,11 +553,11 @@ def test_every_new_archive_key_is_the_name_impurityModel_reads(key):
 
     from impurityModel.ed import model
 
-    _occ, _n, fit_options, basis, solver = parse_solver_line("8 10 4 peeled slater_min 1e-8")
+    _occ, _n, fit_options, basis, solver = parse_solver_line("8 10 peeled slater_min 1e-8")
     assert key in solver_line_attrs(fit_options, basis, solver)
     assert f'"{key}"' in inspect.getsource(model._read_archive_group)
 
 
 def test_mv_defaults_on_and_no_mv_turns_it_off():
-    assert parse_solver_line("3 3 8 chain full")[3].mixed_valence is True
-    assert parse_solver_line("3 3 8 chain full no_mv")[3].mixed_valence is False
+    assert parse_solver_line("3 3 chain full")[3].mixed_valence is True
+    assert parse_solver_line("3 3 chain full no_mv")[3].mixed_valence is False

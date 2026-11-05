@@ -57,7 +57,7 @@ def rspt_memory(monkeypatch):
         mem[name] = ffi.new("char[]", count * SIZE_REAL)
     # Fortran character fields: fixed width, space padded, no NUL terminator.
     mem["label"] = ffi.new("char[18]", b"Ni-3d" + b" " * 13)
-    mem["solver"] = ffi.new("char[100]", b"8 10 2" + b" " * 94)
+    mem["solver"] = ffi.new("char[100]", b"8 10" + b" " * 96)
     mem["dc"] = ffi.new("char[100]", b"gap 0.5" + b" " * 93)
     return mem
 
@@ -172,7 +172,7 @@ def test_the_fixed_width_fortran_strings_arrive_as_str(rspt_memory, monkeypatch)
     _invoke(rspt_memory, monkeypatch, recorder)
     assert seen["label"] == "Ni-3d" + " " * 13
     assert seen["label"].strip() == "Ni-3d"
-    assert seen["solver_line"].strip() == "8 10 2"
+    assert seen["solver_line"].strip() == "8 10"
     assert seen["dc_line"].strip() == "gap 0.5"
 
 

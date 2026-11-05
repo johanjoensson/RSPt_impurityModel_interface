@@ -19,6 +19,7 @@ if "OMP_NUM_THREADS" not in environ:
     )
     environ["OMP_NUM_THREADS"] = "1"
 
+import re  # noqa: E402
 import hashlib  # noqa: E402
 import traceback  # noqa: E402
 from dataclasses import replace  # noqa: E402
@@ -227,7 +228,7 @@ def parse_solver_line(solver_line):
                                               gf_refine_rounds above 0.
       gf_refine_swap X                     -- Largest fraction of the cap one round swaps, in (0, 0.5]. Default 0.1.
                                               Needs gf_refine_rounds above 0.
-      cost_budget X                        -- Hopping-cost budget alpha beside excitation_budget (bath excitations
+      cost_budget X                        -- Hopping-cost budget alpha (bath excitations
                                               cost by their coupling distance from the impurity). Positive. Default
                                               off.
       gf_min_weight X                      -- Drop thermal states whose normalised Boltzmann weight is
@@ -239,22 +240,23 @@ def parse_solver_line(solver_line):
     solver_line = solver_line.split("!")[0]
     solver_line = solver_line.split("#")[0]
     solver_array = solver_line.strip().split()
-    assert (
-        len(solver_array) >= 3
-    ), "The impurityModel ED solver requires at least 3 arguments; N0 nBaths excitation_budget"
+    if len(solver_array) < 2:
+        raise RuntimeError(f"The impurityModel ED solver requires at least 2 arguments; N0 nBaths. Got {solver_line!r}")
     try:
         nominal_occ = int(solver_array[0])
         nBaths = int(solver_array[1])
-        excitation_budget = int(solver_array[2])
     except Exception as e:
         raise RuntimeError(
-            f"{e}\n--->N0 {solver_array[0]}\n--->Nbaths {solver_array[1]}\n"
-            f"--->excitation_budget {solver_array[2]}\n--->Other params {solver_array[3:]}"
+            f"{e}\n--->N0 {solver_array[0]}\n--->Nbaths {solver_array[1]}\n--->Other params {solver_array[2:]}"
         ) from e
-    if excitation_budget < 0:
-        # A negative budget would build an empty admissible window; it means "no budget".
-        print(f"excitation_budget {excitation_budget} is negative: the excitation budget is disabled.", flush=True)
-        excitation_budget = None
+    if len(solver_array) > 2 and re.fullmatch(r"-?\d+", solver_array[2]):
+        fixed = " ".join(solver_array[:2] + solver_array[3:])
+        raise RuntimeError(
+            f"solver line {solver_line.strip()!r}: the third token {solver_array[2]!r} is the excitation budget of the "
+            "old grammar 'N0 nBaths excitation_budget [options]'. The budget is no longer a parameter: impurityModel "
+            "derives the excitation bounds from the converged ground state and prints them in the ground-state "
+            f"report. Delete the token: {fixed!r}"
+        )
     options = {
         "dense_cutoff": 1000,
         "fit_unocc": False,
@@ -293,9 +295,9 @@ def parse_solver_line(solver_line):
         "gf_min_weight": None,
     }
     retired_reort = None
-    if len(solver_array) > 3:
+    if len(solver_array) > 2:
         skip_next = False
-        for i in range(3, len(solver_array)):
+        for i in range(2, len(solver_array)):
             if skip_next:
                 skip_next = False
                 continue
@@ -461,7 +463,6 @@ def parse_solver_line(solver_line):
         chain_restrict=options["chain_restrict"],
         occ_cutoff=options["occ_cutoff"],
         slater_weight_min=options["slater_min"],
-        excitation_budget=excitation_budget,
         cost_budget=options["cost_budget"],
         e_pt2_tol=options["e_pt2_tol"],
     )
@@ -496,9 +497,7 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
 
     Reproduces the historical ``options``-dict attribute dump from the parsed option groups so
     archived runs read back unchanged (see ``impurityModel.ed.model._read_archive_group``), and
-    records every other setting the solve depends on. ``excitation_budget`` in particular must be
-    stored: the archive reader cannot recover it otherwise and falls back to impurityModel's
-    default, so an offline rerun would silently solve a differently restricted problem.
+    records every other setting the solve depends on.
     ``n_baths`` (bath states per impurity orbital) is included when given.
     """
     attrs = {
@@ -531,7 +530,6 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         "truncation_threshold": basis.truncation_threshold,
         "slater_min": basis.slater_weight_min,
         "mv": True if basis.mixed_valence is None else basis.mixed_valence,
-        "excitation_budget": basis.excitation_budget,
         # None = off.
         "cost_budget": basis.cost_budget,
         # None = impurityModel's default (GS_E_PT2_TOL); stored as requested, so an archive read
@@ -547,7 +545,6 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
 # Output-header label for every key of the solver_line_attrs record, in print order.
 _SETTINGS_LABELS = (
     ("n_baths", "Bath states per imp. orb."),
-    ("excitation_budget", "Excitation budget"),
     ("bath_geometry", "Bath geometry"),
     ("collapse_chains", "Collapse chains"),
     ("fit_unocc", "Fit unoccupied states"),
