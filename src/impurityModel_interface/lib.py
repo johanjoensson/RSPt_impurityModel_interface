@@ -93,6 +93,11 @@ try:
         save_Greens_function,
         sigma_inf_dc,
     )
+
+    # Version probe, not an API use: a solver that predates the ground-state-derived excitation bounds still
+    # accepts the retired ``excitation_budget`` and would silently run a different calculation than this
+    # interface's solver-line grammar describes. Fail at import with the rebuild hint instead.
+    from impurityModel.ed.basis_restrictions import get_effective_excitation_bounds  # noqa: F401
 except ImportError as import_error:
     raise ImportError(
         f"Failed to import impurityModel under Python "
