@@ -90,7 +90,7 @@ def test_full_option_line():
     line = (
         "8 10 4 linked_chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 "
         "weight_w0 -1.5 spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 "
-        "slater_min 1e-8 dn 2 mv 1 no_chain_restrict fit_unocc"
+        "slater_min 1e-8 dn 2 no_mv no_chain_restrict fit_unocc"
     )
     n0, n_baths, fit_options, basis, solver = parse_solver_line(line)
     assert n0 == 8
@@ -106,7 +106,7 @@ def test_full_option_line():
     assert basis.truncation_threshold == int(1e7)
     assert basis.slater_weight_min == pytest.approx(1e-8)
     assert basis.dN == 2
-    assert basis.mixed_valence == 1
+    assert basis.mixed_valence is False
     # No dense_green token, so the sparse Green's function path is the default
     assert solver.sparse_green is True
     assert basis.chain_restrict is False
@@ -137,7 +137,7 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     # The parsed groups round-trip to the flat attribute record the HDF5 archive stores.
     _, _, fit_options, basis, solver = parse_solver_line(
         "8 10 4 chain full dense_cutoff 500 gamma 0.1 gaussian weight 3 weight_w0 -1.5 "
-        "spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 slater_min 1e-8 dn 2 mv 1 "
+        "spin_flip_dj occ_cutoff 1e-4 truncation_threshold 1e7 slater_min 1e-8 dn 2 no_mv "
         "dense_green no_chain_restrict fit_unocc"
     )
     attrs = solver_line_attrs(fit_options, basis, solver)
@@ -150,7 +150,7 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["dN"] == 2
     assert attrs["truncation_threshold"] == int(1e7)
     assert attrs["slater_min"] == pytest.approx(1e-8)
-    assert attrs["mv"] == 1
+    assert attrs["mv"] is False
     assert attrs["bath_geometry"] == "chain"
     assert attrs["gamma"] == pytest.approx(0.1)
     assert attrs["weight_function"] == "gaussian"
@@ -191,7 +191,7 @@ def test_negative_excitation_budget_disables_it(capsys):
 
 def test_settings_header_lists_every_archived_setting():
     n0, n_baths, fit_options, basis, solver = parse_solver_line(
-        "3 3 8 chain full gamma 0.1 gaussian dn 2 mv 1 dense_green"
+        "3 3 8 chain full gamma 0.1 gaussian dn 2 no_mv dense_green"
     )
     header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths, tau=0.025, delta=0.01)
     rows = dict(line.split(" |> ") for line in header.strip().splitlines())
@@ -554,27 +554,6 @@ def test_every_new_archive_key_is_the_name_impurityModel_reads(key):
     assert f'"{key}"' in inspect.getsource(model._read_archive_group)
 
 
-@pytest.mark.parametrize("token, expected", [("auto", "auto"), ("ON", "on"), ("false", "off"), ("0", 0), ("2", 2)])
-def test_mv_token_accepts_the_tristate_words_and_legacy_integers(token, expected):
-    from impurityModel_interface.lib import _parse_mv
-
-    assert _parse_mv(token) == expected
-
-
-def test_mv_token_rejects_nonsense():
-    from impurityModel_interface.lib import _parse_mv
-
-    with pytest.raises(ValueError, match="mv"):
-        _parse_mv("maybe")
-
-
-def test_settings_header_names_an_unset_mv_as_the_driver_default():
-    n0, n_baths, fit_options, basis, solver = parse_solver_line("3 3 8 chain full")
-    header = format_settings_header(n0, fit_options, basis, solver, n_baths=n_baths)
-    rows = {label.strip(): value for label, value in (line.split(" |> ") for line in header.strip().splitlines())}
-    assert rows["Mixed valence"] == "auto (default)"
-
-
-def test_a_negative_legacy_mv_is_rejected():
-    with pytest.raises(ValueError, match="mv"):
-        parse_solver_line("3 3 8 chain full mv -1")
+def test_mv_defaults_on_and_no_mv_turns_it_off():
+    assert parse_solver_line("3 3 8 chain full")[3].mixed_valence is True
+    assert parse_solver_line("3 3 8 chain full no_mv")[3].mixed_valence is False

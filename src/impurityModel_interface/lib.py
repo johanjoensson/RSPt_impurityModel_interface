@@ -169,10 +169,7 @@ def parse_solver_line(solver_line):
                                               GS_E_PT2_TOL, 1e-8). The double-counting search
                                               inherits it unless its own line sets 'e_pt2'.
       dn N                                 -- Allowed impurity occupation window (+-dN).
-      mv auto|on|off                       -- Charge-sector ensemble (grand-canonical multi-sector) switch,
-                                              forwarded to impurityModel's Basis. Unset = the driver's
-                                              default ('auto' for Sigma and double counting). A legacy
-                                              integer is accepted (0 = off, non-zero = auto).
+      no_mv                                -- Disable the impurityModel multivalent solver.
       dense_green                          -- Use the dense block-Lanczos Green's function path.
       gf_method lanczos|bicgstab           -- Green's function kernel (default lanczos): one block-Lanczos
                                               recurrence per work unit serving the whole frequency mesh, or
@@ -272,7 +269,7 @@ def parse_solver_line(solver_line):
         "bath_geometry": "peeled",
         "occ_cutoff": 1e-6,
         "dN": None,
-        "mv": None,
+        "mv": True,
         "chain_restrict": True,
         "truncation_threshold": None,
         "slater_min": np.sqrt(np.finfo(float).eps),
@@ -377,9 +374,8 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "dn":
                 options["dN"] = int(solver_array[i + 1])
                 skip_next = True
-            elif arg.lower() == "mv":
-                options["mv"] = _parse_mv(solver_array[i + 1])
-                skip_next = True
+            elif arg.lower() == "no_mv":
+                options["mv"] = False
             elif arg.lower() == "dense_green":
                 options["sparse_green"] = False
             elif arg.lower() in {"gf_method", "gf_admission", "gf_admit_tol"}:
@@ -534,7 +530,7 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         "dN": basis.dN,
         "truncation_threshold": basis.truncation_threshold,
         "slater_min": basis.slater_weight_min,
-        "mv": None if basis.mixed_valence is None else basis.mixed_valence,
+        "mv": True if basis.mixed_valence is None else basis.mixed_valence,
         "excitation_budget": basis.excitation_budget,
         # None = off.
         "cost_budget": basis.cost_budget,
@@ -581,7 +577,7 @@ _SETTINGS_LABELS = (
     ("gf_min_weight", "GF minimal thermal weight"),
     ("occ_cutoff", "Occupation cutoff"),
     ("dN", "dN"),
-    ("mv", "Mixed valence"),
+    ("mv", "Mixed valence allowed"),
     ("chain_restrict", "Chain occ. restrictions"),
     ("slater_min", "Minimal Slater weight"),
     ("e_pt2_tol", "GS residual PT2 tolerance"),
