@@ -162,7 +162,8 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["gf_settle"] is None and attrs["gf_settle_ratio"] is None and attrs["gf_settle_retry"] is None
     assert attrs["gf_prune_tol"] is None and attrs["gf_refine_rounds"] is None and attrs["cost_budget"] is None
     assert attrs["symm_prec"] == pytest.approx(1e-6)  # d9fbbef: the symmetry-detection tolerance is archived too
-    assert len(attrs) == 35
+    assert attrs["interaction_merges_blocks"] is True
+    assert len(attrs) == 36
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
@@ -545,7 +546,15 @@ def test_the_settings_header_names_the_defaults_and_the_explicit_offs():
 
 @pytest.mark.parametrize(
     "key",
-    ["gf_prune_tol", "gf_first_shell_tol", "gf_refine_rounds", "gf_refine_tol", "gf_refine_swap", "cost_budget"],
+    [
+        "gf_prune_tol",
+        "gf_first_shell_tol",
+        "gf_refine_rounds",
+        "gf_refine_tol",
+        "gf_refine_swap",
+        "cost_budget",
+        "interaction_merges_blocks",
+    ],
 )
 def test_every_new_archive_key_is_the_name_impurityModel_reads(key):
     # A misspelt key would be written, never read, and the replay would silently run the default.
@@ -561,3 +570,19 @@ def test_every_new_archive_key_is_the_name_impurityModel_reads(key):
 def test_mv_defaults_on_and_no_mv_turns_it_off():
     assert parse_solver_line("3 3 chain full")[3].mixed_valence is True
     assert parse_solver_line("3 3 chain full no_mv")[3].mixed_valence is False
+
+
+def test_symm_prec_alias_and_interaction_merge_flag():
+    # Raising symm_prec above the default asks for truncation: the one-body blocks become
+    # authoritative and the interaction must not merge them back together.
+    for key in ("symm_prec", "symmetry_prec"):
+        _, _, fit_options, basis, _ = parse_solver_line(f"8 10 {key} 0.05")
+        assert fit_options["symm_prec"] == pytest.approx(0.05)
+        assert basis.interaction_merges_blocks is False
+    _, _, fit_options, basis, _ = parse_solver_line("8 10")
+    assert basis.interaction_merges_blocks is True
+
+
+def test_symm_prec_must_not_be_negative():
+    with pytest.raises(AssertionError, match="must not be negative"):
+        parse_solver_line("8 10 symm_prec -1")

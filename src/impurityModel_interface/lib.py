@@ -7,10 +7,10 @@ import mpi4py
 # libraries (numpy, h5py).
 mpi4py.rc.initialize = False
 mpi4py.rc.finalize = False
-import sys  # noqa: E402
-from os import devnull, environ  # noqa: E402
+import sys
+from os import devnull, environ
 
-from mpi4py import MPI  # noqa: E402
+from mpi4py import MPI
 
 if "OMP_NUM_THREADS" not in environ:
     print(
@@ -19,15 +19,15 @@ if "OMP_NUM_THREADS" not in environ:
     )
     environ["OMP_NUM_THREADS"] = "1"
 
-import re  # noqa: E402
-import hashlib  # noqa: E402
-import traceback  # noqa: E402
-from dataclasses import replace  # noqa: E402
-from importlib.metadata import PackageNotFoundError  # noqa: E402
-from importlib.metadata import version as package_version  # noqa: E402
+import hashlib
+import re
+import traceback
+from dataclasses import replace
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 
-import h5py as h5  # noqa: E402
-import numpy as np  # noqa: E402
+import h5py as h5
+import numpy as np
 
 try:
     from run_impurityModel import ffi
@@ -50,19 +50,21 @@ except ImportError:
             raise RuntimeError("ffi.buffer is only available when embedded in RSPt")
 
     ffi = _FFIStub()
+import rspt2spectra.h0 as rspt2spectra_h0
+from rspt2spectra.block_structure import get_blocks, project_to_blocks
 from rspt2spectra.h0 import (
     assemble_h0,
     flatten_star_levels,
     prepare_hyb_fit,
-)  # noqa: E402
-from rspt2spectra.hyb_fit import fit_hyb  # noqa: E402
-from rspt2spectra.plot import plot_hyb_fit  # noqa: E402
-from rspt2spectra.utils import (  # noqa: E402
+)
+from rspt2spectra.hyb_fit import fit_hyb
+from rspt2spectra.plot import plot_hyb_fit
+from rspt2spectra.utils import (
     rotate_4index_U,
     rotate_Greens_function,
     rotate_matrix,
 )
-from rspt2spectra.weight_functions import weight_functions  # noqa: E402
+from rspt2spectra.weight_functions import weight_functions
 
 try:
     # The stable external surface of the solver; everything under
@@ -81,10 +83,10 @@ try:
         dc_spread,
         discretized_impurity_occupation,
         emit_dc_record,
+        find_environment_file,
         fixed_gap_dc,
         fixed_occupation_dc,
         fixed_peak_dc,
-        find_environment_file,
         fll_dc,
         load_environment,
         nominal_dc,
@@ -97,7 +99,7 @@ try:
     # Version probe, not an API use: a solver that predates the ground-state-derived excitation bounds still
     # accepts the retired ``excitation_budget`` and would silently run a different calculation than this
     # interface's solver-line grammar describes. Fail at import with the rebuild hint instead.
-    from impurityModel.ed.basis_restrictions import get_effective_excitation_bounds  # noqa: F401
+    from impurityModel.ed.basis_restrictions import get_effective_excitation_bounds
 except ImportError as import_error:
     raise ImportError(
         f"Failed to import impurityModel under Python "
@@ -108,6 +110,19 @@ except ImportError as import_error:
         "e.g. `pip install --force-reinstall --no-build-isolation "
         "<path-to-impurityModel>`."
     ) from import_error
+
+# symm_prec needs matching rspt2spectra (partition/projection helpers, versioned blocking) and
+# impurityModel (BasisOptions.interaction_merges_blocks). Fail at import, not mid-DMFT-iteration.
+if "interaction_merges_blocks" not in getattr(BasisOptions, "__dataclass_fields__", {}):
+    raise ImportError(
+        "impurityModel is too old for symm_prec: BasisOptions has no 'interaction_merges_blocks'. "
+        "Rebuild/reinstall impurityModel (and rspt2spectra) for this interpreter."
+    )
+if not hasattr(rspt2spectra_h0, "BLOCKING_VERSION"):
+    raise ImportError(
+        "rspt2spectra is too old for symm_prec: rspt2spectra.h0 has no BLOCKING_VERSION. "
+        "Rebuild/reinstall rspt2spectra for this interpreter."
+    )
 
 
 def _parse_mv(token):
@@ -123,6 +138,12 @@ def _parse_mv(token):
     if value < 0:
         raise ValueError(f"mv: a legacy integer must be >= 0 (0 = off), got {token!r}")
     return value
+
+
+#: The default ``symm_prec``: only numerically negligible couplings (relative 1e-6, never below an
+#: absolute 1e-6 Ry) are dropped, and a value above it asks for truncation, which also stops the
+#: solver from merging the truncated blocks again through the interaction.
+DEFAULT_SYMM_PREC = 1e-6
 
 
 def parse_solver_line(solver_line):
@@ -160,6 +181,16 @@ def parse_solver_line(solver_line):
                                               lingauss, quadgauss, step.
       weight X                             -- Weight function decay/steepness factor.
       weight_w0 X                          -- Center of the weight function (default 0).
+      symm_prec X  (alias symmetry_prec)   -- Couplings between orbitals weaker than X are neglected. X is
+                                              relative: to the strongest diagonal hybridization and to the
+                                              crystal-field spread of H_dft (or to the smallest orbital-resolved
+                                              hybridization width, if larger). The hybridization function and H_dft
+                                              are first rotated to a basis that is as diagonal as possible, then
+                                              orbitals joined only by couplings below X are put in separate
+                                              blocks (e.g. a 5x5 d block splits into 2x2 + 3x3) in the bath fit
+                                              AND in the solver, which then does not merge blocks the
+                                              interaction couples. The threshold is never below an absolute
+                                              1e-6 Ry. Default 1e-6 (only negligible couplings are dropped).
       spin_flip_dj                         -- Accepted and ignored: it never had an effect on the
                                               CIPSI solver and was removed from impurityModel.
       no_chain_restrict                    -- Disable chain occupation restrictions.
@@ -272,7 +303,7 @@ def parse_solver_line(solver_line):
         "weight_function": "unit",
         "weight": 2,
         "weight_w0": 0.0,
-        "symm_prec": 1e-6,
+        "symm_prec": DEFAULT_SYMM_PREC,
         "bath_geometry": "peeled",
         "occ_cutoff": 1e-6,
         "dN": None,
@@ -343,8 +374,10 @@ def parse_solver_line(solver_line):
             elif arg.lower() == "weight_w0":
                 options["weight_w0"] = float(solver_array[i + 1])
                 skip_next = True
-            elif arg.lower() == "symm_prec":
+            elif arg.lower() in ("symm_prec", "symmetry_prec"):
+                assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
                 options["symm_prec"] = float(solver_array[i + 1])
+                assert options["symm_prec"] >= 0, f"'{arg}' must not be negative"
                 skip_next = True
             elif arg.lower() == "gamma":
                 options["gamma"] = float(solver_array[i + 1])
@@ -470,6 +503,9 @@ def parse_solver_line(solver_line):
         slater_weight_min=options["slater_min"],
         cost_budget=options["cost_budget"],
         e_pt2_tol=options["e_pt2_tol"],
+        # Neglecting couplings below symm_prec makes the one-body blocks authoritative; the
+        # solver must then not merge them back because the interaction couples them.
+        interaction_merges_blocks=not options["symm_prec"] > DEFAULT_SYMM_PREC,
     )
     try:
         solver = SolverOptions(
@@ -540,6 +576,7 @@ def solver_line_attrs(fit_options, basis, solver, n_baths=None):
         # None = impurityModel's default (GS_E_PT2_TOL); stored as requested, so an archive read
         # back resolves it the same way the run did.
         "e_pt2_tol": basis.e_pt2_tol,
+        "interaction_merges_blocks": basis.interaction_merges_blocks,
         **fit_options,
     }
     if n_baths is not None:
@@ -560,6 +597,8 @@ _SETTINGS_LABELS = (
     ("weight_function", "Fitting weight function"),
     ("weight", "Fitting weight factor"),
     ("weight_w0", "Fitting weight center w0"),
+    ("symm_prec", "Neglected coupling (relative)"),
+    ("interaction_merges_blocks", "Interaction merges GF blocks"),
     ("dense_cutoff", "Dense matrix size cutoff"),
     ("sparse_green", "Sparse Green's function"),
     ("gf_method", "Green's function method"),
@@ -1240,6 +1279,7 @@ def _solve(
     comm.Bcast(corr_to_cf)
     comm.Bcast(h_dft)
     comm.Bcast(u4)
+    comm.Bcast(sig_dc)
 
     # For python, it makes more sense to put the frequency index first, instead of last
     sig_python = np.moveaxis(sig, -1, 0)
@@ -1256,12 +1296,12 @@ def _solve(
     # of the call (restored from stdout_save at the end), so a context manager
     # is intentionally not used here.
     if rank == 0:
-        sys.stdout = open(  # noqa: SIM115
+        sys.stdout = open(
             f"impurityModel-{label.strip()}{'-dc' if dc_flag == 1 else ''}.out",
             "w",
         )
     elif verbosity > 0:
-        sys.stdout = open(  # noqa: SIM115
+        sys.stdout = open(
             f"impurityModel-{label.strip()}{'-dc' if dc_flag == 1 else ''}-{rank}.out",
             "w",
         )
@@ -1334,6 +1374,8 @@ def _solve(
         v,
         H_bath,
         H_solver,
+        fit_rotation,
+        fit_block_structure,
     ) = get_ed_h0(
         h_dft,
         hyb,
@@ -1358,6 +1400,32 @@ def _solve(
         extra_verbose=(verbosity >= 2),
         comm=comm,
     )
+    # The fit neglected the couplings between blocks (symm_prec) in its own basis, in which the
+    # impurity block, the hopping and the double counting are exactly block diagonal. That is the
+    # basis the solver must work in: rotated back to the CF basis the neglected couplings are
+    # spread over all orbitals again and the solver would merge the blocks. From here on the "CF"
+    # basis is the fitting basis, so the interaction, the Green's functions and the rotation back
+    # to RSPt's correlated basis (corr_to_cf) all follow it.
+    blocks = fit_block_structure.blocks
+    n_total = H_solver.shape[0]
+    U_fit = np.eye(n_total, dtype=complex)
+    U_fit[np.ix_(impurity_indices, impurity_indices)] = fit_rotation
+    H_solver = rotate_matrix(H_solver, U_fit)
+    H_imp = project_to_blocks(rotate_matrix(H_imp, fit_rotation), blocks)
+    v = v @ fit_rotation
+    hyb = rotate_Greens_function(hyb, fit_rotation)
+    h_dft = rotate_matrix(h_dft, fit_rotation)
+    u4 = rotate_4index_U(u4, fit_rotation)
+    sig_dc_cf = project_to_blocks(rotate_matrix(sig_dc_cf, fit_rotation), blocks)
+    corr_to_cf = corr_to_cf @ fit_rotation
+    # Whether the fit actually neglected anything is decided by comparing its partition with the one
+    # the same (unprojected) data gives at the default threshold. Only then are the one-body blocks
+    # authoritative and the interaction must not merge them back; otherwise the safety net stays on.
+    x_lim = _fit_window(w, hyb, not fit_options["fit_unocc"])
+    in_window = (w >= x_lim[0]) & (w <= x_lim[1])
+    default_blocks = get_blocks(hyb[in_window], h_dft, tol=DEFAULT_SYMM_PREC)
+    truncated = len(blocks) > len(default_blocks)
+    basis = replace(basis, interaction_merges_blocks=not truncated)
     # Build one ImpurityModel from the fitted blocks: it assembles the operator and derives the
     # impurity/bath orbital layout from the block sizes (no orbital indices passed). The
     # (valence, conduction) split feeds the double-counting path (calc_selfenergy re-derives its
@@ -1556,6 +1624,8 @@ def _solve(
             emit_dc_record(applied, rank=comm.rank)
             # The double counting is calculated in the CF basis, RSPt expects
             # it in the corr basis.
+            # Project it like the incoming one: the solver neglected the couplings between blocks.
+            damped_dc_cf = project_to_blocks(damped_dc_cf, blocks)
             sig_dc[:, :] = rotate_matrix(damped_dc_cf, np.conj(corr_to_cf.T))
             er = 0
         except DoubleCountingUnreachable as e:
@@ -1694,8 +1764,8 @@ def bind_rspt_callback():
     # Both of these are the point of the function, not an oversight: the module-level import
     # is what failed, so the retry has to be deferred to here, and rebinding the module global
     # is what makes ffi.string/ffi.buffer in _run_impmod_ed resolve to the real handle.
-    global ffi  # noqa: PLW0603
-    from run_impurityModel import ffi as embedded_ffi  # noqa: PLC0415
+    global ffi
+    from run_impurityModel import ffi as embedded_ffi
 
     if ffi is embedded_ffi:
         return
@@ -1763,6 +1833,20 @@ def run_impmod_ed(*args):
             sys.stdout = stdout_save
 
 
+def _fit_window(w, hyb, valence_bath_only):
+    """The ``(lo, hi)`` frequency window the bath fit uses.
+
+    From the first to the last frequency at which the trace of the hybridization function exceeds
+    1e-6, cut at the Fermi level when only the valence bath is fitted. The trace is invariant under
+    the unitary rotation to the fitting basis and under dropping off-block couplings, so the
+    window is the same for ``hyb`` and ``phase_hyb``.
+    """
+    trace = np.abs(np.trace(hyb, axis1=1, axis2=2))
+    w_min = w[np.argmax(trace > 1e-6)]
+    w_max = w[-(np.argmax(trace[::-1] > 1e-6) + 1)]
+    return (w_min, min(0, w_max) if valence_bath_only else w_max)
+
+
 def get_ed_h0(
     H_dft,
     hyb,
@@ -1774,7 +1858,7 @@ def get_ed_h0(
     exp_weight=2,
     weight_function="unit",
     weight_w0=0,
-    symm_prec=1e-6,
+    symm_prec=DEFAULT_SYMM_PREC,
     imag_only=False,
     valence_bath_only=True,
     bath_geometry="peeled_linked_chain",
@@ -1817,7 +1901,12 @@ def get_ed_h0(
     A tuple ``(H_imp, impurity_indices, valence_bath_indices, conduction_bath_indices,
     v_solver, H_bath, H)``: the effective impurity block, the orbital-index classification,
     the impurity-bath hopping ``v_solver``, the bath block ``H_bath``, and the full assembled
-    solver matrix ``H``. Hand ``(H_imp, v_solver, H_bath)`` to
+    solver matrix ``H``, followed by the rotation ``Q`` to the fitting basis and the block
+    structure (in that basis). All of them are in the input (CF) basis; ``Q`` is not block
+    diagonal, so the neglected couplings are spread over all orbitals there. Couplings between
+    blocks below ``symm_prec`` are neglected: ``Q^dagger H_imp Q`` and ``v_solver Q`` are exactly
+    block diagonal. A caller that wants the solver to see the blocks rotates everything with
+    ``Q`` (as ``_solve`` does) before handing ``(H_imp, v_solver, H_bath)`` to
     ``ImpurityModel.from_blocks`` to build the model.
     """
 
@@ -1825,12 +1914,34 @@ def get_ed_h0(
     # rspt2spectra block-diagonalizes the hybridization function, rotates the
     # local hamiltonian into the same (fitting) basis and builds the block
     # partition from the union of both connectivities.
-    Q, phase_hyb, H_local_Q, block_structure = prepare_hyb_fit(hyb, H_dft, tol=symm_prec, verbose=verbose, w=w)
+    # The window is computed once and shared: the rotation and the block partition look at the
+    # hybridization inside the window the fit uses, and nowhere else.
+    x_lim = _fit_window(w, hyb, valence_bath_only)
+    # The rotation and the partition come out of iterative floating-point work whose last bits can
+    # differ between ranks on mixed hardware; a different partition would give ranks different
+    # numbers of collective calls in the fit. Rank 0 decides, the others receive.
+    prepared = None
+    if rank == 0:
+        prepared = prepare_hyb_fit(hyb, H_dft, tol=symm_prec, verbose=verbose, w=w, x_lim=x_lim)
+    if comm is not None:
+        prepared = comm.bcast(prepared, root=0)
+    Q, phase_hyb, H_local_Q, block_structure = prepared
 
-    # Fingerprint of the hybridization function, used to decide whether a
-    # stored bath fit can be reused (identical hybridization) or the fit has
-    # to be redone (new DMFT iteration).
-    hyb_fingerprint = hashlib.sha256(np.ascontiguousarray(hyb).tobytes()).hexdigest()
+    # Fingerprint of what the fit is made from, used to decide whether a stored bath fit can be
+    # reused (identical input) or the fit has to be redone (new DMFT iteration). Only inputs are
+    # hashed, never the output of the rotation, so the decision does not depend on BLAS details.
+    hyb_fingerprint = hashlib.sha256(
+        np.ascontiguousarray(hyb).tobytes()
+        + np.ascontiguousarray(H_dft).tobytes()
+        + repr(
+            (
+                float(symm_prec),
+                tuple(float(x) for x in x_lim),
+                # how the basis is chosen: a changed rotation must not reuse a fit made in the old one
+                getattr(rspt2spectra_h0, "BLOCKING_VERSION", "unversioned"),
+            )
+        ).encode()
+    ).hexdigest()
     ebs_star, vs_star, shifts, block_structure = fit_hyb_star(
         phase_hyb,
         w,
@@ -1850,6 +1961,7 @@ def get_ed_h0(
         freeze_bath_energies=freeze_bath_energies,
         warm_start=warm_start,
         warm_tol=warm_tol,
+        x_lim=x_lim,
     )
 
     # rspt2spectra turns the (flattened) star fit into the requested bath
@@ -1908,6 +2020,8 @@ def get_ed_h0(
         v_solver,
         H_bath,
         H,
+        Q,
+        block_structure,
     )
 
 
@@ -1930,6 +2044,7 @@ def fit_hyb_star(
     freeze_bath_energies=False,
     warm_start=True,
     warm_tol=0.05,
+    x_lim=None,
 ):
     vs_star = None
     ebs_star = None
@@ -2022,9 +2137,8 @@ def fit_hyb_star(
     warm_start_info = None
     if ebs_star is None:
         warm_start_info = []
-        trace_phase_hyb = np.sum(np.diagonal(phase_hyb, axis1=1, axis2=2), axis=1)
-        w_min = w[np.argmax(np.abs(trace_phase_hyb) > 1e-6)]
-        w_max = w[-(np.argmax(np.abs(trace_phase_hyb)[::-1] > 1e-6) + 1)]
+        if x_lim is None:
+            x_lim = _fit_window(w, phase_hyb, valence_bath_only)
         ebs_star, vs_star, shifts = fit_hyb(
             w,
             eim,
@@ -2032,7 +2146,7 @@ def fit_hyb_star(
             bath_states_per_orbital,
             block_structure,
             gamma=gamma,
-            x_lim=(w_min, min(0, w_max) if valence_bath_only else w_max),
+            x_lim=x_lim,
             verbose=verbose,
             comm=comm,
             weight_fun=get_weight_function(weight_function, weight_w0, exp_weight),
