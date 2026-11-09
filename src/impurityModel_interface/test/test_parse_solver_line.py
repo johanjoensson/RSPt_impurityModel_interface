@@ -584,5 +584,21 @@ def test_symm_prec_alias_and_interaction_merge_flag():
 
 
 def test_symm_prec_must_not_be_negative():
-    with pytest.raises(AssertionError, match="must not be negative"):
+    with pytest.raises(RuntimeError, match="not negative"):
         parse_solver_line("8 10 symm_prec -1")
+
+
+@pytest.mark.parametrize("line", ["8 10 symm_prec", "8 10 symm_prec inf", "8 10 symm_prec nan", "8 10 symm_prec abc"])
+def test_symm_prec_rejects_missing_or_unusable_values(line):
+    with pytest.raises(RuntimeError, match="symm_prec"):
+        parse_solver_line(line)
+
+
+@pytest.mark.parametrize("text", ["1d-2", "1D-2", "0.01", "1e-2"])
+def test_symm_prec_accepts_fortran_exponents_and_any_case(text):
+    for key in ("SYMM_PREC", "Symmetry_Prec"):
+        assert parse_solver_line(f"8 10 {key} {text}")[2]["symm_prec"] == pytest.approx(0.01)
+
+
+def test_symm_prec_below_the_default_keeps_merging_on():
+    assert parse_solver_line("8 10 symm_prec 1e-9")[3].interaction_merges_blocks is True

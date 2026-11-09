@@ -375,9 +375,17 @@ def parse_solver_line(solver_line):
                 options["weight_w0"] = float(solver_array[i + 1])
                 skip_next = True
             elif arg.lower() in ("symm_prec", "symmetry_prec"):
-                assert i + 1 < len(solver_array), f"'{arg}' on the solver line needs a value"
-                options["symm_prec"] = float(solver_array[i + 1])
-                assert options["symm_prec"] >= 0, f"'{arg}' must not be negative"
+                if i + 1 >= len(solver_array):
+                    raise RuntimeError(f"'{arg}' on the solver line needs a value")
+                token = solver_array[i + 1]
+                try:
+                    # Fortran writes 1d-2 for 1e-2
+                    value = float(re.sub(r"(?<=[0-9.])[dD](?=[+-]?\d)", "e", token))
+                except ValueError:
+                    raise RuntimeError(f"'{arg}' needs a number, got {token!r}") from None
+                if not np.isfinite(value) or value < 0:
+                    raise RuntimeError(f"'{arg}' must be a finite number that is not negative, got {token!r}")
+                options["symm_prec"] = value
                 skip_next = True
             elif arg.lower() == "gamma":
                 options["gamma"] = float(solver_array[i + 1])
@@ -752,8 +760,14 @@ def h5_write_dataset(group, name, data):
     group.create_dataset(name, data=data)
 
 
-def _previous_damped_dc(hdf5_filename, label, comm):
+def _previous_damped_dc(hdf5_filename, label, comm, corr_to_cf=None):
     """The double counting this interface returned on the most recent earlier iteration.
+
+    It is stored in the solver basis of the iteration that produced it, which is the fitting
+    basis and changes from one iteration to the next. With ``corr_to_cf`` (the current
+    iteration's solver-basis-to-correlated-basis rotation) the stored matrix is carried through
+    the correlated basis into the current solver basis, so the damping adds like to like. An
+    archive group without a stored ``corr_to_cf`` is returned as it is.
 
     This -- not the ``sig_dc`` RSPt hands in -- is the anchor the damping has to pull toward.
     RSPt rebuilds ``sig_dc`` from its own FLL/AMF potential on every ``double_counting`` call
@@ -777,6 +791,18 @@ def _previous_damped_dc(hdf5_filename, label, comm):
                     group_name = f"{label.strip()} {it}"
                     if group_name in f and "DC damped" in f[group_name]:
                         previous = np.asarray(f[group_name]["DC damped"])
+                        if corr_to_cf is not None and "corr_to_cf" in f[group_name]:
+                            previous_c = np.asarray(f[group_name]["corr_to_cf"])
+                            if previous_c.shape == np.shape(corr_to_cf) and previous.shape == previous_c.shape:
+                                previous = rotate_matrix(
+                                    rotate_matrix(previous, np.conj(previous_c.T)), np.asarray(corr_to_cf)
+                                )
+                            else:
+                                print(
+                                    f"The stored double counting of {group_name} has another basis shape; "
+                                    "damping against it unrotated.",
+                                    flush=True,
+                                )
                         break
         except (OSError, KeyError):
             # No archive yet (first call of a fresh run), or an unreadable one: no anchor.
@@ -1311,6 +1337,11 @@ def _solve(
 
     hdf5_filename = "impurityModel_data.h5"
     _nominal_occ, bath_states_per_orbital, fit_options, basis, solver = parse_solver_line(solver_line)
+    if rank == 0 and len(solver_line.strip()) >= 100 and not re.search(r"[!#]", solver_line):
+        print(
+            "WARNING: the solver line fills all 100 characters RSPt passes; the last option may have been cut off.",
+            flush=True,
+        )
     # tau is not part of the solver line; inject the external temperature onto the basis options.
     basis = replace(basis, tau=tau)
     print(
@@ -1407,6 +1438,23 @@ def _solve(
     # basis is the fitting basis, so the interaction, the Green's functions and the rotation back
     # to RSPt's correlated basis (corr_to_cf) all follow it.
     blocks = fit_block_structure.blocks
+    # Whether the fit actually neglected anything is decided by comparing its partition with the one
+    # the same (unprojected, input-basis) data gives at the default threshold. Only then are the
+    # one-body blocks authoritative and the interaction must not merge them back; otherwise the
+    # safety net stays on. Rank 0 decides: the ranks must agree on the solver's block structure.
+    truncated = None
+    if rank == 0:
+        x_lim = _fit_window(w, hyb, not fit_options["fit_unocc"])
+        in_window = (w >= x_lim[0]) & (w <= x_lim[1])
+        if not np.any(in_window):
+            in_window = np.ones(len(w), dtype=bool)
+        # Compared in the fitting basis, the one the fit's partition lives in: the same data in the
+        # input basis is denser and would give fewer blocks whatever was neglected.
+        default_blocks = get_blocks(
+            rotate_Greens_function(hyb[in_window], fit_rotation), rotate_matrix(h_dft, fit_rotation), tol=DEFAULT_SYMM_PREC
+        )
+        truncated = len(blocks) > len(default_blocks)
+    truncated = bool(comm.bcast(truncated, root=0))
     n_total = H_solver.shape[0]
     U_fit = np.eye(n_total, dtype=complex)
     U_fit[np.ix_(impurity_indices, impurity_indices)] = fit_rotation
@@ -1418,14 +1466,20 @@ def _solve(
     u4 = rotate_4index_U(u4, fit_rotation)
     sig_dc_cf = project_to_blocks(rotate_matrix(sig_dc_cf, fit_rotation), blocks)
     corr_to_cf = corr_to_cf @ fit_rotation
-    # Whether the fit actually neglected anything is decided by comparing its partition with the one
-    # the same (unprojected) data gives at the default threshold. Only then are the one-body blocks
-    # authoritative and the interaction must not merge them back; otherwise the safety net stays on.
-    x_lim = _fit_window(w, hyb, not fit_options["fit_unocc"])
-    in_window = (w >= x_lim[0]) & (w <= x_lim[1])
-    default_blocks = get_blocks(hyb[in_window], h_dft, tol=DEFAULT_SYMM_PREC)
-    truncated = len(blocks) > len(default_blocks)
     basis = replace(basis, interaction_merges_blocks=not truncated)
+    if rank == 0:
+        if truncated:
+            print(
+                f"symm_prec {fit_options['symm_prec']:g}: couplings between {len(blocks)} blocks are neglected "
+                "in the fit and in the solver (the interaction does not merge them).",
+                flush=True,
+            )
+        elif fit_options["symm_prec"] > DEFAULT_SYMM_PREC:
+            print(
+                f"symm_prec {fit_options['symm_prec']:g} neglects no coupling of this problem; "
+                "the solver may still merge blocks the interaction couples.",
+                flush=True,
+            )
     # Build one ImpurityModel from the fitted blocks: it assembles the operator and derives the
     # impurity/bath orbital layout from the block sizes (no orbital indices passed). The
     # (valence, conduction) split feeds the double-counting path (calc_selfenergy re-derives its
@@ -1577,11 +1631,14 @@ def _solve(
             # counting that does NOT satisfy the criterion the search just converged, on every
             # CSC iteration. With no previous answer on record (the first iteration) there is
             # nothing to damp against, so the converged value is returned undamped.
-            previous_dc_cf = _previous_damped_dc(hdf5_filename, label, comm)
+            previous_dc_cf = _previous_damped_dc(hdf5_filename, label, comm, corr_to_cf=corr_to_cf)
             if previous_dc_cf is None:
                 damped_dc_cf = dc_cf
             else:
                 damped_dc_cf = previous_dc_cf + dc_alpha * (dc_cf - previous_dc_cf)
+            # What RSPt receives, and what is stored as "DC damped": the solver neglected the
+            # couplings between blocks, so the double counting carries none either.
+            damped_dc_cf = project_to_blocks(damped_dc_cf, blocks)
             if comm.rank == 0:
                 # Persist the full damped DC matrix (never the bare mu) and fingerprint it
                 # against the dc_guess it was computed from, so the archive can be audited for
@@ -1624,8 +1681,7 @@ def _solve(
             emit_dc_record(applied, rank=comm.rank)
             # The double counting is calculated in the CF basis, RSPt expects
             # it in the corr basis.
-            # Project it like the incoming one: the solver neglected the couplings between blocks.
-            damped_dc_cf = project_to_blocks(damped_dc_cf, blocks)
+            # (already projected onto the blocks above)
             sig_dc[:, :] = rotate_matrix(damped_dc_cf, np.conj(corr_to_cf.T))
             er = 0
         except DoubleCountingUnreachable as e:
