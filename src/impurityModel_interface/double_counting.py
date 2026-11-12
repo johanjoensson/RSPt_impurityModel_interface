@@ -20,6 +20,7 @@ from impurityModel.api import (
 from rspt2spectra.block_structure import project_to_blocks
 
 from . import archive
+from .mpi import on_root
 
 
 def _banner(rank, headline, error, with_traceback):
@@ -130,8 +131,10 @@ def run_double_counting(
         # The solver neglected the couplings between blocks, so the double counting carries none.
         damped = project_to_blocks(damped, blocks)
         alpha = request.alpha if previous is not None else 1.0
-        if rank == 0:
-            archive.write_double_counting(
+        # A failed write on rank 0 is raised on every rank, so none of them applies a DC the others do not.
+        on_root(
+            comm,
+            lambda: archive.write_double_counting(
                 filename,
                 label,
                 alpha=alpha,
@@ -140,7 +143,8 @@ def run_double_counting(
                 damped=damped,
                 sector=sector,
                 cap=cap_ledger.resolved,
-            )
+            ),
+        )
         # The criterion printed the DC it *converged*; RSPt receives it damped.  A second record, in
         # the same format and between the same delimiters, states what was applied.
         applied = {

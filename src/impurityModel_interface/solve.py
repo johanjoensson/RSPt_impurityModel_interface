@@ -34,6 +34,7 @@ from . import archive
 from .dc_line import parse_dc_line
 from .double_counting import run_double_counting as search_double_counting
 from .h0_fit import fit_h0
+from .mpi import on_root
 from .solver_line import format_settings_header, parse_solver_line, with_temperature
 
 
@@ -374,8 +375,9 @@ def solve(
             verbosity=verbosity,
         )
         fitted = context["fitted"]
-        if rank == 0:
-            archive.write_problem(
+        on_root(
+            comm,
+            lambda: archive.write_problem(
                 archive.FILENAME,
                 label,
                 line=context["line"],
@@ -393,9 +395,10 @@ def solve(
                 corr_to_cf=problem.corr_to_cf,
                 rot_to_spherical=context["rot_to_spherical"],
                 layout=(fitted.impurity_indices, fitted.valence_bath_indices, fitted.conduction_bath_indices),
-            )
-        if verbosity >= 1 and rank == 0:
-            _report_fit(problem, context, w=w, eim=eim, tau=tau, label=label, comm=comm)
+            ),
+        )
+        if verbosity >= 1:
+            on_root(comm, lambda: _report_fit(problem, context, w=w, eim=eim, tau=tau, label=label, comm=comm))
 
         if dc_flag == 1:
             return run_double_counting(
