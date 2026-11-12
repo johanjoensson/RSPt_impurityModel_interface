@@ -10,9 +10,7 @@ the frequency meshes, the corr -> CF rotation and all solver options.
 Point IMPMOD_INTERFACE_TEST_DATA at an archive to run the test; it is skipped
 otherwise. Run under MPI with e.g. `mpirun -n 2 pytest interface_test.py`.
 
-Note: archives written before the switch to RSPt's u4 index convention stored
-"U" with the first two indices swapped (the old `np.moveaxis(u4, 1, 0)`
-workaround) and are not compatible with this test; regenerate the archive
+Archives written before the archive was versioned are refused by the loader; regenerate the archive
 with a current wrapper run.
 """
 
@@ -25,7 +23,7 @@ h5 = pytest.importorskip("h5py")
 pytest.importorskip("mpi4py")
 api = pytest.importorskip("impurityModel.api")
 
-from impurityModel.api import calc_selfenergy, matrixToIOp  # noqa: E402
+from impurityModel.api import calc_selfenergy, load_selfenergy_archive  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 from rspt2spectra.utils import rotate_Greens_function, rotate_matrix  # noqa: E402
 
@@ -42,69 +40,28 @@ requires_data = pytest.mark.skipif(
 )
 
 
-def read_cluster(filename):
-    """Load the newest iteration of the first cluster in the archive."""
+def read_references(filename, label, iteration):
+    """The rotation to the correlated basis and the stored self-energies of one iteration."""
     with h5.File(filename, "r") as f:
-        it = f.attrs["last iteration"]
-        cluster_names = [name for name in f if name.endswith(f" {it}")]
-        assert cluster_names, f"No cluster group for iteration {it} in {filename}"
-        g = f[cluster_names[0]]
-        label = cluster_names[0].rsplit(" ", 1)[0]
-
-        data = {
-            "label": label,
-            "H_solver": g["H solver"][...],
-            "u4": g["U"][...],
-            "w": g["Real frequency mesh"][...],
-            "iw": g["Matsubara frequency mesh"][...],
-            "rot_to_spherical": g["Rot to spherical"][...],
+        g = f[f"{label} {iteration}"]
+        return {
             "corr_to_cf": g["corr_to_cf"][...],
-            "impurity_orbitals": [int(i) for i in g["Impurity orbitals"][...]],
-            "tau": g.attrs["tau"],
-            "delta": g.attrs["delta"],
-            "nominal_occ": int(g.attrs["nominal occupation"]),
-            "options": {key: g.attrs[key] for key in g.attrs},
             "sigma_static_ref": g["Sigma Static"][...] if "Sigma Static" in g else None,
             "sigma_ref": g["Sigma Matsubara"][...] if "Sigma Matsubara" in g else None,
             "sigma_real_ref": g["Sigma real"][...] if "Sigma real" in g else None,
         }
-    return data
 
 
 @requires_data
 def test_selfenergy_against_reference():
-    data = read_cluster(TEST_DATA)
+    model, meshes, basis, solver, label = load_selfenergy_archive(TEST_DATA)
+    with h5.File(TEST_DATA, "r") as f:
+        iteration = int(f.attrs["last iteration"])
+    data = read_references(TEST_DATA, label, iteration)
     if data["sigma_ref"] is None:
         pytest.skip("Archive holds no reference self-energy (double counting run?)")
-    options = data["options"]
-    dN = options["dN"]
-    dN = None if isinstance(dN, str) else int(dN)
-    mv = options["mv"]
-    mixed_valence = mv
 
-    h_op = matrixToIOp(data["H_solver"])
-    results = calc_selfenergy(
-        h0=h_op,
-        u4=data["u4"],
-        iw=1j * data["iw"],
-        w=data["w"],
-        delta=data["delta"],
-        nominal_occ={0: data["nominal_occ"]},
-        mixed_valence=mixed_valence,
-        impurity_orbitals={0: data["impurity_orbitals"]},
-        tau=data["tau"],
-        verbosity=0,
-        rot_to_spherical=data["rot_to_spherical"],
-        cluster_label=data["label"],
-        comm=MPI.COMM_WORLD,
-        dense_cutoff=int(options["dense_cutoff"]),
-        chain_restrict=bool(options["chain_restrict"]),
-        occ_cutoff=float(options["occ_cutoff"]),
-        truncation_threshold=int(options["truncation_threshold"]),
-        slaterWeightMin=float(options["slater_min"]),
-        dN=dN,
-        sparse_green=bool(options["sparse_green"]),
-    )
+    results = calc_selfenergy(model, meshes, basis, solver, comm=MPI.COMM_WORLD, verbosity=0, cluster_label=label)
 
     if MPI.COMM_WORLD.rank != 0:
         return
