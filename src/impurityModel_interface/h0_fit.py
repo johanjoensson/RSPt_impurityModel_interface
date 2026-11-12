@@ -8,7 +8,7 @@ run on the *same* bath fit -- and the seed for the next iteration's warm start.
 from dataclasses import dataclass
 
 import numpy as np
-from rspt2spectra.h0 import assemble_h0, fit_bath, fit_window, prepare_hyb_fit
+from rspt2spectra.h0 import assemble_h0, bath_fit_fingerprint, fit_bath, fit_window, prepare_hyb_fit
 from rspt2spectra.plot import plot_hyb_fit
 
 from . import archive
@@ -85,12 +85,14 @@ def fit_h0(
         comm=comm,
     )
     block_structure = fit_basis.block_structure
+    # Everything the stored fit depends on: the hybridization and basis, and nBaths, mesh, gamma, weight.
+    fit_key = bath_fit_fingerprint(fit_basis, w, eim, n_baths, options)
 
     # RSPt calls run_impmod_ed twice per CSC iteration (the DC search, then the self-energy); each
     # call runs this fit.  If the two did not use the same bath fit, the DC would have been
     # determined on a different model than the one it is applied to.
     def look_up():
-        stored, _found, iteration = archive.load_stored_fit(filename, label, fit_basis.fingerprint, block_structure)
+        stored, _found, iteration = archive.load_stored_fit(filename, label, fit_key, block_structure)
         where = "iteration ?" if iteration is None else f"iteration {iteration}"
         if stored is not None:
             print("Reading stored bath energies and hopping parameters")
@@ -131,8 +133,8 @@ def fit_h0(
         verbose=verbose,
         comm=comm,
     )
-    if rank == 0 and stored_fit is None:
-        archive.store_bath_fit(filename, label, fit_basis.fingerprint, block_structure, bath_fit)
+    if stored_fit is None:
+        on_root(comm, lambda: archive.store_bath_fit(filename, label, fit_key, block_structure, bath_fit))
 
     # rspt2spectra turns the flattened star fit into the requested geometry and assembles h0,
     # including the star reference that classifies bath states as valence/conduction.
