@@ -10,9 +10,9 @@ label per self-consistency iteration plus once more for the double-counting pass
 import os
 
 import pytest
-
 from impurityModel.api import find_environment_file
-from impurityModel_interface import lib
+
+from impurityModel_interface import entry
 
 KNOB = "GF_BICGSTAB_ATOL"
 
@@ -37,8 +37,8 @@ def in_a_run_directory(tmp_path, monkeypatch):
 
 def _call_with_recorder(monkeypatch, recorder):
     """Invoke the wrapper with the real solve replaced by a recorder."""
-    monkeypatch.setattr(lib, "_run_impmod_ed", recorder)
-    return lib.run_impmod_ed()
+    monkeypatch.setattr(entry, "_run_impmod_ed", recorder)
+    return entry.run_impmod_ed()
 
 
 def test_the_knob_is_set_during_the_call_and_gone_after(in_a_run_directory, monkeypatch):
@@ -100,8 +100,8 @@ def test_the_arguments_reach_the_solve_unchanged(in_a_run_directory, monkeypatch
         captured["args"] = args
         return 0
 
-    monkeypatch.setattr(lib, "_run_impmod_ed", recorder)
-    lib.run_impmod_ed("label", "solver line", 3, 4.5)
+    monkeypatch.setattr(entry, "_run_impmod_ed", recorder)
+    entry.run_impmod_ed("label", "solver line", 3, 4.5)
     assert captured["args"] == ("label", "solver line", 3, 4.5)
 
 

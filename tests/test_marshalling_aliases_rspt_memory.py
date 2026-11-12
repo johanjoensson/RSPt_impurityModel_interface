@@ -21,7 +21,7 @@ cffi = pytest.importorskip("cffi")
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: F401,E402
 
-from impurityModel_interface import lib  # noqa: E402
+from impurityModel_interface import entry  # noqa: E402
 
 N_ORB, N_IW, N_W = 4, 6, 8
 SIZE_REAL, SIZE_COMPLEX = 8, 16
@@ -48,7 +48,7 @@ INPUTS = ("h_dft", "u4", "hyb")
 def rspt_memory(monkeypatch):
     """Allocations standing in for RSPt's, reachable both as pointers and as raw bytes."""
     ffi = cffi.FFI()
-    monkeypatch.setattr(lib, "ffi", ffi)
+    monkeypatch.setattr(entry, "ffi", ffi)
 
     mem = {"_ffi": ffi}
     for name, count in COMPLEX_ARRAYS.items():
@@ -69,8 +69,8 @@ def _raw(mem, name):
 
 
 def _invoke(mem, monkeypatch, recorder):
-    monkeypatch.setattr(lib, "_solve", recorder)
-    return lib._run_impmod_ed(
+    monkeypatch.setattr(entry, "solve", recorder)
+    return entry._run_impmod_ed(
         mem["label"],
         mem["solver"],
         mem["dc"],

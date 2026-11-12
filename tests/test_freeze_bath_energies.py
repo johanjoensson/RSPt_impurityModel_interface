@@ -16,7 +16,8 @@ pytest.importorskip("mpi4py")
 h5 = pytest.importorskip("h5py")
 from mpi4py import MPI  # noqa: F401,E402
 
-from impurityModel_interface.lib import _previous_bath_energies, h5_write_dataset  # noqa: E402
+from impurityModel_interface.archive import previous_bath_energies as _previous_bath_energies  # noqa: E402
+from impurityModel_interface.archive import write_dataset as h5_write_dataset  # noqa: E402
 
 LABEL = "Ni 1"
 BLOCKS = SimpleNamespace(inequivalent_blocks=[0, 2])
@@ -90,3 +91,11 @@ def test_a_fit_on_the_same_block_partition_is_reused(tmp_path):
     eb = _previous_bath_energies(path, LABEL, BLOCKS)
     np.testing.assert_allclose(eb[0], [-0.5])
     np.testing.assert_allclose(eb[1], [-0.8])
+
+
+def test_write_dataset_overwrites(tmp_path):
+    with h5.File(tmp_path / "test.h5", "w") as f:
+        g = f.create_group("g")
+        h5_write_dataset(g, "data", np.arange(3))
+        h5_write_dataset(g, "data", np.arange(5))  # must not raise, and must store the new data
+        assert np.array_equal(g["data"][...], np.arange(5))

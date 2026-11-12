@@ -14,7 +14,7 @@ with open("run_impurityModel.h") as f:
 # interpreter or running the init code failed; checking it is the only way to see that case.
 #
 # The sibling failure -- an exception inside the callback, which also returned 0 by default --
-# is handled on the Python side by @ffi.def_extern(..., error=-1) in lib.py.
+# is handled on the Python side by @ffi.def_extern(..., error=-1) in entry.py.
 ffibuilder.set_source(
     "run_impurityModel",
     r"""
@@ -50,12 +50,12 @@ CFFI_DLLEXPORT int run_impmod_ed(char label[], char solver_param[], char dc_para
 
 # bind_rspt_callback() is a no-op unless something imported the package before cffi
 # registered this module -- a sitecustomize.py or a .pth file, which run during
-# Py_InitializeEx. In that case lib.py took its ImportError fallback and the @ffi.def_extern
+# Py_InitializeEx. In that case entry.py took its ImportError fallback and the @ffi.def_extern
 # decorator was the stub's no-op, so cffi would answer every call with "no code was attached
 # to it yet ... Returning 0" and RSPt would read 0 as a successful solve.
 ffibuilder.embedding_init_code(r"""
     import impurityModel_interface
-    impurityModel_interface.lib.bind_rspt_callback()
+    impurityModel_interface.entry.bind_rspt_callback()
 """)
 
 ffibuilder.emit_c_code("run_impurityModel.c")

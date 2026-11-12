@@ -1,7 +1,7 @@
 """The bath fit is warm-started from the previous iteration's fit by default.
 
-``fit_hyb_star`` reads the most recent stored bath energies and hands them to rspt2spectra's
-``fit_hyb`` as a warm start; rspt2spectra keeps the warm fit unless a global search beats it by
+``fit_h0`` reads the most recent stored bath energies and hands them to rspt2spectra's
+``fit_bath`` as a warm start; rspt2spectra keeps the warm fit unless a global search beats it by
 more than ``warm_tol`` (the basin-stability itself is tested in rspt2spectra's
 ``test_warm_start.py``). This pins the wiring: what is seeded when, and the audit trail it leaves
 in the archive.
@@ -12,11 +12,10 @@ import pytest
 
 pytest.importorskip("mpi4py")
 h5 = pytest.importorskip("h5py")
-from mpi4py import MPI  # noqa: F401,E402
-from rspt2spectra.block_structure import build_block_structure  # noqa: E402
-from rspt2spectra.offdiagonal import get_hyb  # noqa: E402
+from mpi4py import MPI  # noqa: E402
+from rspt2spectra import FitOptions  # noqa: E402
 
-from impurityModel_interface.lib import fit_hyb_star  # noqa: E402
+from impurityModel_interface.h0_fit import fit_h0  # noqa: E402
 
 LABEL = "Ni 1"
 W = np.linspace(-5, 5, 351)
@@ -27,29 +26,25 @@ Z = W + 1j * (EIM * (1 + 0.5 * np.abs(W) ** 2))
 def _hyb(s):
     eb = np.array([-2.0, -1.2, -0.4])
     v = np.array([0.7 * s, 0.7, 0.7 / s]).reshape(-1, 1)
-    return get_hyb(Z, eb, v)
+    return np.einsum("bi,wb,bj->wij", v, 1 / (Z[:, None] - eb[None, :]), v)
 
 
-def _fit(path, s, **kwargs):
+def _fit(path, s, **options):
     hyb = _hyb(s)
-    block_structure = build_block_structure(hyb, mat=np.zeros(hyb.shape[1:]), tol=1e-6, w=W)
-    return fit_hyb_star(
+    options = {"bath_geometry": "star", "fit_unocc": True, **options}
+    return fit_h0(
+        np.zeros((1, 1)),
         hyb,
+        2,
         W,
         EIM,
-        2,
-        block_structure,
-        0.0,
-        True,
-        "unit",
-        0.0,
-        2,
-        LABEL,
-        path,
-        False,
-        None,
-        hyb_fingerprint=f"s={s}",
-        **kwargs,
+        FitOptions(**options),
+        u4=np.zeros((1, 1, 1, 1), dtype=complex),
+        rot_to_spherical=np.eye(1, dtype=complex),
+        label=LABEL,
+        filename=path,
+        verbose=False,
+        comm=MPI.COMM_WORLD,
     )
 
 
@@ -84,20 +79,20 @@ def test_cold_fit_ignores_the_previous_fit(tmp_path):
 
 def test_freezing_still_holds_the_previous_energies(tmp_path):
     path = tmp_path / "a.h5"
-    first, _, _, _ = _fit(path, 1.15)
-    second, _, _, _ = _fit(path, 1.3, freeze_bath_energies=True)
+    first = _fit(path, 1.15)
+    second = _fit(path, 1.3, freeze_bath_energies=True)
     audit, _ = _fit_group(path, 2)
     assert list(audit["warm start"]) == ["frozen"]
-    np.testing.assert_allclose(np.unique(second[0]), np.unique(first[0]))
+    np.testing.assert_allclose(np.unique(np.diag(second.H_bath).round(10)), np.unique(np.diag(first.H_bath).round(10)))
 
 
 def test_the_same_hybridization_reuses_the_stored_fit(tmp_path, capsys):
     # The DC pass and the self-energy pass of one iteration share one fit; no warm start runs.
     path = tmp_path / "a.h5"
-    first, _, _, _ = _fit(path, 1.15)
+    first = _fit(path, 1.15)
     capsys.readouterr()
-    again, _, _, _ = _fit(path, 1.15)
+    again = _fit(path, 1.15)
     assert "REUSED" in capsys.readouterr().out
-    np.testing.assert_array_equal(again[0], first[0])
+    np.testing.assert_array_equal(again.H_bath, first.H_bath)
     with h5.File(path, "r") as f:
         assert int(f.attrs["last iteration"]) == 1

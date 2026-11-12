@@ -1,22 +1,24 @@
-"""``symm_prec`` through ``_solve``: the solver line value reaches the fit, and the solver and the
+"""``symm_prec`` through ``solve``: the solver line value reaches the fit, and the solver and the
 double-counting search are told whether the fit neglected anything.
 
-``_solve`` is driven on the synthetic 2 + 3 orbital problem of ``test_symm_prec_truncation`` with
+``solve`` is driven on the synthetic 2 + 3 orbital problem of ``test_symm_prec_truncation`` with
 ``calc_selfenergy`` and ``fixed_occupation_dc`` replaced by spies, so no ED runs. The bath fit and
 the archive are real.
 """
 
 import sys
+from pathlib import Path
 
 import h5py as h5
 import numpy as np
 import pytest
+from scipy.sparse.csgraph import connected_components
 
 pytest.importorskip("mpi4py")
-from mpi4py import MPI  # noqa: F401
+from mpi4py import MPI
 from rspt2spectra.utils import rotate_matrix
 
-from impurityModel_interface import lib
+from impurityModel_interface import double_counting, solve
 
 N = 5
 N_IW = 4
@@ -37,10 +39,8 @@ def restore_stdout():
 @pytest.fixture
 def tmp_path(tmp_path_factory):
     """One working directory for all ranks: only rank 0 writes the archive the tests read back."""
-    import pathlib
-
     path = MPI.COMM_WORLD.bcast(str(tmp_path_factory.mktemp("wiring")), root=0)
-    return pathlib.Path(path)
+    return Path(path)
 
 
 def _problem(coupling, unitary=None, weak=True, connect_last=False):
@@ -95,7 +95,7 @@ def _solve(tmp_path, monkeypatch, solver_line, problem, dc_flag=0, dc_line="occ 
         corr_to_spherical_in=np.eye(N, dtype=complex, order="F"),
         corr_to_cf_in=np.eye(N, dtype=complex, order="F"),
     )
-    status = lib._solve(
+    status = solve.solve(
         label="t",
         solver_line=solver_line,
         dc_line=dc_line,
@@ -113,8 +113,6 @@ def _solve(tmp_path, monkeypatch, solver_line, problem, dc_flag=0, dc_line="occ 
 
 
 def _n_components(matrix, tol=1e-12):
-    from scipy.sparse.csgraph import connected_components
-
     return connected_components(np.abs(matrix) > tol, directed=False)[0]
 
 
@@ -125,18 +123,19 @@ def _install_spies(monkeypatch, dc_in_corr=None, sigma_static_cf=None):
     connected components of the impurity block and of the double counting handed to the solver.
     """
     calls = []
-    real_from_blocks = lib.ImpurityModel.from_blocks.__func__
+    real_from_blocks = solve.ImpurityModel.from_blocks.__func__
 
     def from_blocks(cls, H_imp, V, H_bath, *, dc=None, **kwargs):
         calls.append(("model", _n_components(H_imp), None if dc is None else _n_components(dc)))
         return real_from_blocks(cls, H_imp, V, H_bath, dc=dc, **kwargs)
 
-    monkeypatch.setattr(lib.ImpurityModel, "from_blocks", classmethod(from_blocks))
-    real_get_ed_h0 = lib.get_ed_h0
+    monkeypatch.setattr(solve.ImpurityModel, "from_blocks", classmethod(from_blocks))
+    real_fit_h0 = solve.fit_h0
 
-    def get_ed_h0(*args, **kwargs):
-        calls.append(("get_ed_h0", kwargs.get("symm_prec")))
-        return real_get_ed_h0(*args, **kwargs)
+    def fit_h0(*args, **kwargs):
+        options = args[5]
+        calls.append(("fit_h0", options.symm_prec))
+        return real_fit_h0(*args, **kwargs)
 
     def corr_to_cf_of(model):
         return model.rot_to_spherical.conj().T  # corr_to_spherical_in is the identity
@@ -158,11 +157,11 @@ def _install_spies(monkeypatch, dc_in_corr=None, sigma_static_cf=None):
             "gs_realaxis": None,
         }
 
-    monkeypatch.setattr(lib, "get_ed_h0", get_ed_h0)
+    monkeypatch.setattr(solve, "fit_h0", fit_h0)
     if dc_in_corr is not None:
-        monkeypatch.setattr(lib, "fixed_occupation_dc", fixed_occupation_dc)
+        monkeypatch.setattr(double_counting, "fixed_occupation_dc", fixed_occupation_dc)
     if sigma_static_cf is not None:
-        monkeypatch.setattr(lib, "calc_selfenergy", calc_selfenergy)
+        monkeypatch.setattr(solve, "calc_selfenergy", calc_selfenergy)
     return calls
 
 
@@ -171,7 +170,7 @@ def test_value_reaches_the_fit_and_the_solver_is_told_blocks_are_authoritative(t
     sigma = _hermitian(1)
     calls = _install_spies(monkeypatch, sigma_static_cf=sigma)
     _solve(tmp_path, monkeypatch, f"3 3 {key} 0.05", _problem(3e-3))
-    assert ("get_ed_h0", 0.05) in calls
+    assert ("fit_h0", 0.05) in calls
     assert ("sigma", False) in calls
     # the model handed to the solver is block diagonal: the weak 2 <-> 3 couplings are gone
     models = [c for c in calls if c[0] == "model"]
@@ -181,7 +180,7 @@ def test_value_reaches_the_fit_and_the_solver_is_told_blocks_are_authoritative(t
 def test_default_keeps_the_interaction_merging(tmp_path, monkeypatch):
     calls = _install_spies(monkeypatch, sigma_static_cf=_hermitian(1))
     _solve(tmp_path, monkeypatch, "3 3", _problem(3e-3))
-    assert ("get_ed_h0", 1e-6) in calls
+    assert ("fit_h0", 1e-6) in calls
     assert ("sigma", True) in calls
 
 
@@ -241,14 +240,15 @@ def test_damped_double_counting_is_added_in_one_basis(tmp_path, monkeypatch):
 def test_the_fit_gets_the_interaction_and_the_densification_budget(tmp_path, monkeypatch, line, expected):
     seen = {}
 
-    def get_ed_h0(*args, **kwargs):
+    def fit_h0(*args, **kwargs):
         seen.update(kwargs)
+        seen["options"] = args[5]
         raise RuntimeError("stop after the fit call")
 
-    monkeypatch.setattr(lib, "get_ed_h0", get_ed_h0)
+    monkeypatch.setattr(solve, "fit_h0", fit_h0)
     with pytest.raises(RuntimeError, match="stop after the fit call"):
         _solve(tmp_path, monkeypatch, line, _problem(3e-3))
-    assert seen["u_densify"] == expected
+    assert seen["options"].u_densify == expected
     assert seen["u4"].shape == (N,) * 4
     # corr_to_cf and corr_to_spherical are the identity here
     assert np.allclose(seen["rot_to_spherical"], np.eye(N))

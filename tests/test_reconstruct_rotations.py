@@ -15,11 +15,11 @@ import pytest
 
 # impurityModel accesses MPI.COMM_WORLD at import time. Embedded in RSPt, MPI
 # is initialized by Fortran; here we have to initialize it ourselves *before*
-# importing lib (which sets mpi4py.rc.initialize = False).
+# importing the package (which sets mpi4py.rc.initialize = False).
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: F401
 
-from impurityModel_interface.lib import reconstruct_rotations
+from impurityModel_interface.solve import reconstruct_rotations
 
 
 def _one_spin_inputs(n_orb, n_rot_cols, n_orb_full, rng):

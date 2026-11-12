@@ -1,6 +1,6 @@
 """A DC-search failure must not abort a charge-self-consistent run.
 
-The DC branch of ``_run_impmod_ed`` used to answer *any* exception from the criterion
+The DC branch of the solve used to answer *any* exception from the criterion
 (``fixed_gap_dc`` and friends) by writing ``inf`` into ``sig_dc`` and calling
 ``comm.Abort`` -- one bad sector solve killed the whole multi-hour RSPt job. It now
 degrades the way the ``DoubleCountingUnreachable`` branch already did: leave RSPt's incoming
@@ -8,14 +8,13 @@ DC untouched, stamp an audit attribute on the archive, and let the loop continue
 the shared archive-recording helper both branches use.
 """
 
-import numpy as np
 import pytest
 
 pytest.importorskip("mpi4py")
 h5 = pytest.importorskip("h5py")
 from mpi4py import MPI  # noqa: F401,E402
 
-from impurityModel_interface.lib import _record_dc_audit_attr  # noqa: E402
+from impurityModel_interface.archive import record_dc_audit_attr as _record_dc_audit_attr  # noqa: E402
 
 LABEL = "Ni 1"
 

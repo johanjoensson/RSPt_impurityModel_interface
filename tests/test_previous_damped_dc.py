@@ -15,16 +15,20 @@ import pytest
 
 pytest.importorskip("mpi4py")
 pytest.importorskip("h5py")
-import h5py as h5  # noqa: E402
-from mpi4py import MPI  # noqa: F401,E402
+import h5py as h5
+from mpi4py import MPI  # noqa: F401
 
-from impurityModel_interface.lib import (  # noqa: E402
-    _double_counting_cap,
-    _double_counting_sector,
-    _previous_damped_dc,
-    _split_total_over_groups,
-    h5_write_dataset,
+from impurityModel_interface.archive import (
+    double_counting_cap as _double_counting_cap,
 )
+from impurityModel_interface.archive import (
+    double_counting_sector as _double_counting_sector,
+)
+from impurityModel_interface.archive import (
+    previous_damped_dc as _previous_damped_dc,
+)
+from impurityModel_interface.archive import write_dataset as h5_write_dataset
+from impurityModel_interface.solve import split_total_over_groups as _split_total_over_groups
 
 LABEL = "Ni 1"
 

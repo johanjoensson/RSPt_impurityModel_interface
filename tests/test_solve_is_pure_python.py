@@ -1,11 +1,11 @@
-"""``_solve`` runs on numpy arrays, with no cffi handle anywhere in sight.
+"""``solve`` runs on numpy arrays, with no cffi handle anywhere in sight.
 
 Before the split, everything below the argument marshalling lived in one function whose first
 act was ``ffi.string(rspt_label, 18)``. Reaching any of it from a test meant either an
-embedded interpreter or a fake cffi handle, so none of it was reached. ``_run_impmod_ed`` now
-owns the pointers and ``_solve`` owns the physics, which makes the physics callable.
+embedded interpreter or a fake cffi handle, so none of it was reached. ``entry._run_impmod_ed`` now
+owns the pointers and ``solve`` owns the physics, which makes the physics callable.
 
-What this pins is the seam itself: ``_solve`` accepts ``str`` and ``numpy`` and gets far
+What this pins is the seam itself: ``solve`` accepts ``str`` and ``numpy`` and gets far
 enough in to enforce its own preconditions.
 """
 
@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: F401
 
-from impurityModel_interface import lib
+from impurityModel_interface import solve
 
 N_ORB = 4
 N_IW = 6
@@ -26,10 +26,10 @@ N_W = 8
 
 @pytest.fixture
 def restore_stdout():
-    """``_solve`` redirects sys.stdout and only restores it on the paths it completes.
+    """``solve`` redirects sys.stdout and only restores it on the paths it completes.
 
-    In production ``run_impmod_ed`` is the net for the rest (see
-    ``test_entry_point_returns_failure``). A test calling ``_solve`` directly is its own net.
+    In production ``entry.run_impmod_ed`` is the net for the rest (see
+    ``test_entry_point_returns_failure``). A test calling ``solve`` directly is its own net.
     """
     saved = sys.stdout
     yield
@@ -57,7 +57,7 @@ def _arrays():
 
 def _call(tmp_path, monkeypatch, solver_line):
     monkeypatch.chdir(tmp_path)
-    return lib._solve(
+    return solve.solve(
         label="Ni-3d",
         solver_line=solver_line,
         dc_line="",
@@ -73,7 +73,7 @@ def _call(tmp_path, monkeypatch, solver_line):
 
 
 def test_an_impossible_nominal_occupation_is_rejected(tmp_path, monkeypatch, restore_stdout):
-    """Eight electrons will not fit in four spin-orbitals, and _solve says so itself."""
+    """Eight electrons will not fit in four spin-orbitals, and solve says so itself."""
     with pytest.raises(RuntimeError, match="out of bounds"):
         _call(tmp_path, monkeypatch, "8 10")
 
@@ -96,7 +96,7 @@ def test_it_got_there_without_a_cffi_handle(tmp_path, monkeypatch, restore_stdou
 
 
 def test_it_opens_the_per_cluster_output_file(tmp_path, monkeypatch, restore_stdout):
-    """The redirect is part of _solve, so a direct call produces the same .out file."""
+    """The redirect is part of solve, so a direct call produces the same .out file."""
     with pytest.raises(RuntimeError):
         _call(tmp_path, monkeypatch, "8 10")
     assert (tmp_path / "impurityModel-Ni-3d.out").exists()

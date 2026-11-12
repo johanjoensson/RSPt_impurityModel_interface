@@ -1,7 +1,7 @@
 """End to end: couplings below ``symm_prec`` are neglected by the bath fit, and above it they are kept.
 
 A synthetic 5-orbital problem (2 + 3 orbitals) with a weak coupling between the two groups, both in
-the hybridization function and in H_dft. ``get_ed_h0`` must hand back an impurity block that is exactly
+the hybridization function and in H_dft. ``fit_h0`` must hand back an impurity block that is exactly
 block diagonal in the fitting basis when ``symm_prec`` exceeds the coupling, and the same block must
 carry the coupling when it does not.
 """
@@ -11,8 +11,9 @@ import pytest
 
 pytest.importorskip("mpi4py")
 from mpi4py import MPI
+from rspt2spectra import FitOptions
 
-from impurityModel_interface.lib import get_ed_h0
+from impurityModel_interface.h0_fit import fit_h0
 
 N = 5
 COUPLING = 3e-3
@@ -37,17 +38,18 @@ def _problem():
 def _run(tmp_path, monkeypatch, symm_prec):
     monkeypatch.chdir(tmp_path)
     H, hyb, w, eim = _problem()
-    return get_ed_h0(
+    return fit_h0(
         H,
         hyb,
         3,
         w,
         eim,
-        0.0,
-        symm_prec=symm_prec,
-        verbose=False,
+        FitOptions(symm_prec=symm_prec),
+        u4=np.zeros((N,) * 4, dtype=complex),
+        rot_to_spherical=np.eye(N, dtype=complex),
         label="t",
-        hdf5_filename="fit.h5",
+        filename="fit.h5",
+        verbose=False,
         comm=MPI.COMM_WORLD,
     )
 
@@ -60,13 +62,15 @@ def _off_block(mat, blocks):
 
 
 def test_coupling_below_symm_prec_is_neglected(tmp_path, monkeypatch):
-    H_imp, *_rest, Q, bs = _run(tmp_path, monkeypatch, 0.05)
+    fitted = _run(tmp_path, monkeypatch, 0.05)
+    H_imp, Q, bs = fitted.H_imp, fitted.rotation, fitted.block_structure
     assert len(bs.blocks) > 1
     assert _off_block(Q.conj().T @ H_imp @ Q, bs.blocks) < 1e-12
 
 
 def test_coupling_above_symm_prec_is_kept(tmp_path, monkeypatch):
-    H_imp, *_rest, Q, bs = _run(tmp_path, monkeypatch, 1e-6)
+    fitted = _run(tmp_path, monkeypatch, 1e-6)
+    H_imp, Q, bs = fitted.H_imp, fitted.rotation, fitted.block_structure
     # the weak e_g/t_2g coupling joins the two groups into one block, so it survives in the
     # returned impurity block (which also carries the static hybridization shift)
     assert any(len(b) >= 4 for b in bs.blocks)
@@ -76,9 +80,10 @@ def test_coupling_above_symm_prec_is_kept(tmp_path, monkeypatch):
 
 
 def test_neglecting_removes_exactly_that_coupling(tmp_path, monkeypatch):
-    kept, *_rest, Qk, _ = _run(tmp_path, monkeypatch, 1e-6)
-    cut, *_rest, Qc, _ = _run(tmp_path / "cut", monkeypatch, 0.05) if (tmp_path / "cut").mkdir() is None else None
-    Hk = Qk.conj().T @ kept @ Qk
-    Hc = Qc.conj().T @ cut @ Qc
+    kept = _run(tmp_path, monkeypatch, 1e-6)
+    (tmp_path / "cut").mkdir()
+    cut = _run(tmp_path / "cut", monkeypatch, 0.05)
+    Hk = kept.rotation.conj().T @ kept.H_imp @ kept.rotation
+    Hc = cut.rotation.conj().T @ cut.H_imp @ cut.rotation
     assert np.abs(Hc[np.ix_([0, 1], [2, 3, 4])]).max() < 1e-12
     assert np.abs(Hk[np.ix_([0, 1], [2, 3, 4])]).max() > 1e-4

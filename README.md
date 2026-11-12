@@ -14,6 +14,29 @@ many-body ED solve (self-energy, double counting) behind its stable
 `impurityModel.api` façade. The two upstream packages are independent of each
 other; this wrapper is their only meeting point.
 
+It does not contain option lists, fit logic or numerical decisions: the fit options
+come from `rspt2spectra.parse_fit_tokens`, the solver options from
+`impurityModel.api.parse_option_tokens`, and the solver line only adds the leading
+`N0 nBaths`.
+
+## Layout
+| Module | Job |
+|---|---|
+| `entry.py` | what RSPt calls: CFFI stub and callback, pointers to numpy views, `[environment]` file |
+| `solve.py` | one DMFT step: `prepare_problem`, `run_double_counting`, `run_selfenergy` |
+| `h0_fit.py` | Δ(ω) to h0 through rspt2spectra, with bath-fit reuse and warm start |
+| `solver_line.py`, `dc_line.py` | the two line grammars RSPt passes |
+| `double_counting.py` | DC criterion dispatch and damping |
+| `archive.py` | the only module that touches HDF5: iteration state and results |
+| `mpi.py` | decide on rank 0, broadcast, re-raise everywhere |
+
+The rationale for the double-counting criteria is in `doc/double_counting.md`.
+
+## Tests
+`OMP_NUM_THREADS=1 pytest` from the repository root (`pyproject.toml` puts `src` on the
+path, so the source tree is tested, never an installed copy). `tests/interface_test.py`
+replays an archive when `IMPMOD_INTERFACE_TEST_DATA` points at one.
+
 ## Supported orbital representations
 RSPt can define the correlated orbitals in spherical harmonics, crystal-field
 (cubic) combinations — including subsets of a shell such as t2g or eg only —
@@ -22,7 +45,7 @@ without spin polarization and spin-orbit coupling. The wrapper handles all of
 these: RSPt sends the rotation matrices with one spin block when the
 calculation is neither spin polarized nor relativistic (`nspmat = 1`), and the
 wrapper duplicates that block onto both spins (`reconstruct_rotations` in
-`lib.py`); otherwise the matrices are used as received. The impurityModel ED
+`solve.py`); otherwise the matrices are used as received. The impurityModel ED
 solver requires the cluster to contain exactly one correlated orbital set and
 nothing else. When the correlated set spans only part of a shell, the
 rotation to spherical harmonics is rectangular and impurityModel skips the

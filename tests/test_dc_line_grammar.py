@@ -9,9 +9,15 @@ alongside the new ``gap``.
 import pytest
 
 pytest.importorskip("mpi4py")
-from mpi4py import MPI  # noqa: F401,E402
+from mpi4py import MPI  # noqa: F401
 
-from impurityModel_interface.lib import _parse_dc_line  # noqa: E402
+from impurityModel_interface.dc_line import parse_dc_line
+
+
+def _parse_dc_line(line):
+    """The request as the ``(mode, target, alpha, de2_min, e_pt2_tol)`` tuple these tests compare."""
+    request = parse_dc_line(line)
+    return request.mode, request.target, request.alpha, request.de2_min, request.e_pt2_tol
 
 
 @pytest.mark.parametrize(
@@ -62,7 +68,7 @@ def test_a_bare_number_is_still_a_peak_position_not_a_gap_offset():
 
 
 def test_a_gap_line_with_too_many_arguments_is_rejected():
-    with pytest.raises(AssertionError, match="at most 1 argument"):
+    with pytest.raises(ValueError, match="at most 1 argument"):
         _parse_dc_line("gap 0.5 0.7")
 
 
@@ -74,19 +80,19 @@ def test_a_line_naming_no_criterion_is_rejected_cleanly(line):
     leaves that list *empty* -- and an empty list must reach the same assertion an unrecognised
     keyword does, not an ``IndexError`` from indexing past the end of it.
     """
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         _parse_dc_line(line)
 
 
 def test_alpha_without_a_value_says_so():
-    with pytest.raises(AssertionError, match="needs a value"):
+    with pytest.raises(ValueError, match="needs a value"):
         _parse_dc_line("gap alpha")
 
 
 def test_an_unknown_keyword_names_the_criteria_it_could_have_been():
     """A typo must not be silently read as a peak position -- ``float()`` raises, and the
     assertion above it lists what was available, ``gap`` included."""
-    with pytest.raises((AssertionError, ValueError)):
+    with pytest.raises((ValueError, ValueError)):
         _parse_dc_line("gapp 0.5")
 
 
@@ -119,7 +125,7 @@ def test_de2_min_composes_with_alpha_and_ground_state_manifold_in_any_order():
 
 
 def test_de2_min_needs_a_value():
-    with pytest.raises(AssertionError, match="de2_min"):
+    with pytest.raises(ValueError, match="de2_min"):
         _parse_dc_line("gap 0.5 de2_min")
 
 
@@ -127,7 +133,7 @@ def test_de2_min_must_be_positive():
     """Zero would admit every candidate the expansion can reach, which is not a loosening but an
     unbounded one; a negative value is meaningless."""
     for bad in ("0", "-1e-6"):
-        with pytest.raises(AssertionError, match="positive"):
+        with pytest.raises(ValueError, match="positive"):
             _parse_dc_line(f"gap 0.5 de2_min {bad}")
 
 
@@ -142,7 +148,7 @@ def test_de2_min_is_stripped_before_the_criterion_argument_count():
 def test_de2_min_is_rejected_on_the_static_schemes(scheme):
     """A static scheme runs no charge-sector solve, so the token could only be ignored. Reject it
     loudly, the same discipline the line applies to every modifier that would do nothing."""
-    with pytest.raises(AssertionError, match="de2_min"):
+    with pytest.raises(ValueError, match="de2_min"):
         _parse_dc_line(f"{scheme} de2_min 1e-6")
 
 
@@ -179,10 +185,10 @@ def test_e_pt2_composes_with_every_other_modifier_in_any_order():
 
 
 def test_e_pt2_needs_a_positive_value():
-    with pytest.raises(AssertionError, match="needs a value"):
+    with pytest.raises(ValueError, match="needs a value"):
         _parse_dc_line("gap 0.5 e_pt2")
     for bad in ("0", "-1e-8"):
-        with pytest.raises(AssertionError, match="positive"):
+        with pytest.raises(ValueError, match="positive"):
             _parse_dc_line(f"gap 0.5 e_pt2 {bad}")
 
 
@@ -190,7 +196,7 @@ def test_e_pt2_needs_a_positive_value():
 def test_e_pt2_is_rejected_where_it_would_do_nothing(line):
     """`occ` converges on the production path, to the solver line's e_pt2; the static schemes
     solve nothing. Either way the token could only be ignored, so it is refused."""
-    with pytest.raises(AssertionError, match="e_pt2"):
+    with pytest.raises(ValueError, match="e_pt2"):
         _parse_dc_line(f"{line} e_pt2 1e-5")
 
 

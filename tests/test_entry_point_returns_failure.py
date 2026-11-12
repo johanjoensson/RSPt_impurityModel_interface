@@ -19,13 +19,13 @@ import pytest
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: F401
 
-from impurityModel_interface import lib
+from impurityModel_interface import entry
 
 
 def _call(monkeypatch, impl):
     """Invoke the entry point with the marshalling half replaced."""
-    monkeypatch.setattr(lib, "_run_impmod_ed", impl)
-    return lib.run_impmod_ed()
+    monkeypatch.setattr(entry, "_run_impmod_ed", impl)
+    return entry.run_impmod_ed()
 
 
 def test_success_is_forwarded_unchanged(monkeypatch):
@@ -125,30 +125,30 @@ def test_bind_rspt_callback_registers_with_the_error_backstop(monkeypatch):
     """The third silent-zero route: an early import leaves the callback unregistered.
 
     A sitecustomize.py, usercustomize.py or .pth file imports this package during
-    Py_InitializeEx, before cffi has registered ``run_impurityModel``. lib.py then takes the
+    Py_InitializeEx, before cffi has registered ``run_impurityModel``. entry.py then takes the
     _FFIStub fallback and the decorator is a no-op, so cffi answers every call with "no code
     was attached to it yet ... Returning 0" -- and RSPt reads 0 as a successful solve.
     """
     fake = _RecordingFFI()
     monkeypatch.setitem(sys.modules, "run_impurityModel", type("M", (), {"ffi": fake}))
-    monkeypatch.setattr(lib, "ffi", object())  # whatever the stub left behind
+    monkeypatch.setattr(entry, "ffi", object())  # whatever the stub left behind
 
-    lib.bind_rspt_callback()
+    entry.bind_rspt_callback()
 
-    assert lib.ffi is fake, "ffi.string/ffi.buffer would still resolve to the stub"
+    assert entry.ffi is fake, "ffi.string/ffi.buffer would still resolve to the stub"
     assert len(fake.registrations) == 1
     name, error, func = fake.registrations[0]
     assert name == "run_impmod_ed_py"
     assert error == -1, "without this the re-registered callback returns 0 on an exception"
-    assert func is lib.run_impmod_ed
+    assert func is entry.run_impmod_ed
 
 
 def test_bind_rspt_callback_is_a_no_op_on_the_normal_path(monkeypatch):
     """RSPt's first call imports the package after cffi is ready; nothing to repair."""
     fake = _RecordingFFI()
     monkeypatch.setitem(sys.modules, "run_impurityModel", type("M", (), {"ffi": fake}))
-    monkeypatch.setattr(lib, "ffi", fake)
+    monkeypatch.setattr(entry, "ffi", fake)
 
-    lib.bind_rspt_callback()
+    entry.bind_rspt_callback()
 
     assert fake.registrations == []
