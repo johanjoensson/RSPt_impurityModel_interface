@@ -296,12 +296,16 @@ def record_dc_audit_attr(filename, label, comm, attr, value):
 
     Lets a charge-self-consistent run be audited for which iterations determined a double counting
     and which fell back to the previous value.  Writes on rank 0; nothing reads it back, so there is
-    no broadcast.
+    no broadcast.  A failed stamp is reported and swallowed: this runs in a failure handler, and an
+    exception on rank 0 alone would leave the other ranks waiting at the next barrier.
     """
     if comm is not None and comm.rank != 0:
         return
-    with h5.File(filename, "a") as f:
-        _iteration_group(f, label).attrs[attr] = value
+    try:
+        with h5.File(filename, "a") as f:
+            _iteration_group(f, label).attrs[attr] = value
+    except Exception as error:
+        print(f"Could not record {attr!r} in {filename}: {error!r}", flush=True)
 
 
 def _iteration_attr(filename, label, comm, attr):
