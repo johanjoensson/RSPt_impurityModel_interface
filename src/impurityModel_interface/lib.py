@@ -20,6 +20,7 @@ if "OMP_NUM_THREADS" not in environ:
     environ["OMP_NUM_THREADS"] = "1"
 
 import hashlib
+import inspect
 import re
 import traceback
 from dataclasses import replace
@@ -118,6 +119,11 @@ if "interaction_merges_blocks" not in getattr(BasisOptions, "__dataclass_fields_
         "impurityModel is too old for symm_prec: BasisOptions has no 'interaction_merges_blocks'. "
         "Rebuild/reinstall impurityModel (and rspt2spectra) for this interpreter."
     )
+if "u4" not in inspect.signature(rspt2spectra_h0.prepare_hyb_fit).parameters:
+    raise ImportError(
+        "rspt2spectra is too old for u_densify: prepare_hyb_fit takes no 'u4'. "
+        "Rebuild/reinstall rspt2spectra for this interpreter."
+    )
 if not hasattr(rspt2spectra_h0, "BLOCKING_VERSION"):
     raise ImportError(
         "rspt2spectra is too old for symm_prec: rspt2spectra.h0 has no BLOCKING_VERSION. "
@@ -144,6 +150,10 @@ def _parse_mv(token):
 #: absolute 1e-6 Ry) are dropped, and a value above it asks for truncation, which also stops the
 #: solver from merging the truncated blocks again through the interaction.
 DEFAULT_SYMM_PREC = 1e-6
+
+#: The default ``u_densify``: the fitting basis may make the Coulomb tensor at most this many times
+#: denser (number of non-negligible elements) than it is in the basis RSPt hands over.
+DEFAULT_U_DENSIFY = 2.0
 
 
 def parse_solver_line(solver_line):
@@ -191,6 +201,12 @@ def parse_solver_line(solver_line):
                                               AND in the solver, which then does not merge blocks the
                                               interaction couples. The threshold is never below an absolute
                                               1e-6 Ry. Default 1e-6 (only negligible couplings are dropped).
+      u_densify X                          -- How far the choice of the fitting basis may densify the Coulomb tensor
+                                              (X times its number of non-negligible terms, default 2). A rigid
+                                              rotation of the shell (SO(3)) is used if it makes the hybridization
+                                              and H_dft as nearly block diagonal as a free rotation; otherwise a
+                                              free rotation, only as far as the budget allows. 'inf' turns the
+                                              limit off (free rotation, however dense the interaction gets).
       spin_flip_dj                         -- Accepted and ignored: it never had an effect on the
                                               CIPSI solver and was removed from impurityModel.
       no_chain_restrict                    -- Disable chain occupation restrictions.
@@ -304,6 +320,7 @@ def parse_solver_line(solver_line):
         "weight": 2,
         "weight_w0": 0.0,
         "symm_prec": DEFAULT_SYMM_PREC,
+        "u_densify": DEFAULT_U_DENSIFY,
         "bath_geometry": "peeled",
         "occ_cutoff": 1e-6,
         "dN": None,
@@ -386,6 +403,18 @@ def parse_solver_line(solver_line):
                 if not np.isfinite(value) or value < 0:
                     raise RuntimeError(f"'{arg}' must be a finite number that is not negative, got {token!r}")
                 options["symm_prec"] = value
+                skip_next = True
+            elif arg.lower() == "u_densify":
+                if i + 1 >= len(solver_array):
+                    raise RuntimeError(f"'{arg}' on the solver line needs a value")
+                token = solver_array[i + 1]
+                try:
+                    value = float(re.sub(r"(?<=[0-9.])[dD](?=[+-]?\d)", "e", token))
+                except ValueError:
+                    raise RuntimeError(f"'{arg}' needs a number or 'inf', got {token!r}") from None
+                if np.isnan(value) or value < 1:
+                    raise RuntimeError(f"'{arg}' must be at least 1 (or inf), got {token!r}")
+                options["u_densify"] = value
                 skip_next = True
             elif arg.lower() == "gamma":
                 options["gamma"] = float(solver_array[i + 1])
@@ -487,6 +516,7 @@ def parse_solver_line(solver_line):
             "weight",
             "weight_w0",
             "symm_prec",
+            "u_densify",
             "fit_unocc",
             "freeze_bath_energies",
             "warm_start",
@@ -606,6 +636,7 @@ _SETTINGS_LABELS = (
     ("weight", "Fitting weight factor"),
     ("weight_w0", "Fitting weight center w0"),
     ("symm_prec", "Neglected coupling (relative)"),
+    ("u_densify", "Max. Coulomb densification"),
     ("interaction_merges_blocks", "Interaction merges GF blocks"),
     ("dense_cutoff", "Dense matrix size cutoff"),
     ("sparse_green", "Sparse Green's function"),
@@ -1418,6 +1449,9 @@ def _solve(
         weight_function=fit_options["weight_function"],
         weight_w0=fit_options["weight_w0"],
         symm_prec=fit_options["symm_prec"],
+        u4=u4,
+        rot_to_spherical=np.conj(corr_to_cf.T) @ corr_to_spherical,
+        u_densify=fit_options["u_densify"],
         exp_weight=fit_options["weight"],
         imag_only=False,
         valence_bath_only=not fit_options["fit_unocc"],
@@ -1444,17 +1478,23 @@ def _solve(
     # safety net stays on. Rank 0 decides: the ranks must agree on the solver's block structure.
     truncated = None
     if rank == 0:
-        x_lim = _fit_window(w, hyb, not fit_options["fit_unocc"])
-        in_window = (w >= x_lim[0]) & (w <= x_lim[1])
-        if not np.any(in_window):
-            in_window = np.ones(len(w), dtype=bool)
-        # Compared in the fitting basis, the one the fit's partition lives in: the same data in the
-        # input basis is denser and would give fewer blocks whatever was neglected.
-        default_blocks = get_blocks(
-            rotate_Greens_function(hyb[in_window], fit_rotation), rotate_matrix(h_dft, fit_rotation), tol=DEFAULT_SYMM_PREC
-        )
-        truncated = len(blocks) > len(default_blocks)
-    truncated = bool(comm.bcast(truncated, root=0))
+        try:
+            x_lim = _fit_window(w, hyb, not fit_options["fit_unocc"])
+            in_window = (w >= x_lim[0]) & (w <= x_lim[1])
+            if not np.any(in_window):
+                in_window = np.ones(len(w), dtype=bool)
+            # Compared in the fitting basis, the one the fit's partition lives in: the same data in the
+            # input basis is denser and would give fewer blocks whatever was neglected.
+            default_blocks = get_blocks(
+                rotate_Greens_function(hyb[in_window], fit_rotation), rotate_matrix(h_dft, fit_rotation), tol=DEFAULT_SYMM_PREC
+            )
+            truncated = len(blocks) > len(default_blocks)
+        except Exception as exc:  # noqa: BLE001 - re-raised on every rank below
+            truncated = f"{type(exc).__name__}: {exc}"
+    truncated = comm.bcast(truncated, root=0)
+    if isinstance(truncated, str):
+        raise RuntimeError(f"Checking the neglected couplings failed on rank 0: {truncated}")
+    truncated = bool(truncated)
     n_total = H_solver.shape[0]
     U_fit = np.eye(n_total, dtype=complex)
     U_fit[np.ix_(impurity_indices, impurity_indices)] = fit_rotation
@@ -1915,6 +1955,9 @@ def get_ed_h0(
     weight_function="unit",
     weight_w0=0,
     symm_prec=DEFAULT_SYMM_PREC,
+    u4=None,
+    rot_to_spherical=None,
+    u_densify=DEFAULT_U_DENSIFY,
     imag_only=False,
     valence_bath_only=True,
     bath_geometry="peeled_linked_chain",
@@ -1939,6 +1982,9 @@ def get_ed_h0(
     Parameters:
     hyb           -- The real frequency hybridiaztion function, in the CF basis. Used to fit the bath states.
     hdft          -- The DFT hamiltonian, projected onto the impurity orbitals, in the CF basis.
+    u4, rot_to_spherical, u_densify -- Optional. With the Coulomb tensor (CF basis) and the map from the CF
+                      orbitals to spherical harmonics, the fitting basis is chosen so that it does not densify
+                      ``u4`` by more than ``u_densify`` (see ``rspt2spectra.h0.prepare_hyb_fit``).
     sig_dc        -- The double counting correction, in the CF basis (or scalar 0).
     bath_states   -- Number of bath states to fit per impurity orbital.
     w             -- Real frequency mesh.
@@ -1973,22 +2019,48 @@ def get_ed_h0(
     # The window is computed once and shared: the rotation and the block partition look at the
     # hybridization inside the window the fit uses, and nowhere else.
     x_lim = _fit_window(w, hyb, valence_bath_only)
+    if comm is not None:
+        x_lim = comm.bcast(x_lim, root=0)  # every rank fits in rank 0's window
     # The rotation and the partition come out of iterative floating-point work whose last bits can
     # differ between ranks on mixed hardware; a different partition would give ranks different
     # numbers of collective calls in the fit. Rank 0 decides, the others receive.
-    prepared = None
+    # A failure on rank 0 is broadcast and re-raised everywhere, so no rank is left waiting in the bcast.
+    outcome = None
     if rank == 0:
-        prepared = prepare_hyb_fit(hyb, H_dft, tol=symm_prec, verbose=verbose, w=w, x_lim=x_lim)
+        try:
+            outcome = (
+                None,
+                prepare_hyb_fit(
+                    hyb,
+                    H_dft,
+                    tol=symm_prec,
+                    verbose=verbose,
+                    w=w,
+                    x_lim=x_lim,
+                    u4=u4,
+                    to_spherical=rot_to_spherical,
+                    max_u_densify=u_densify,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - re-raised on every rank below
+            outcome = (f"{type(exc).__name__}: {exc}", None)
     if comm is not None:
-        prepared = comm.bcast(prepared, root=0)
+        outcome = comm.bcast(outcome, root=0)
+    if outcome[0] is not None:
+        raise RuntimeError(f"Fit-basis search failed on rank 0: {outcome[0]}")
+    prepared = outcome[1]
     Q, phase_hyb, H_local_Q, block_structure = prepared
 
     # Fingerprint of what the fit is made from, used to decide whether a stored bath fit can be
     # reused (identical input) or the fit has to be redone (new DMFT iteration). Only inputs are
     # hashed, never the output of the rotation, so the decision does not depend on BLAS details.
+    u_aware = u4 is not None and np.isfinite(u_densify)
     hyb_fingerprint = hashlib.sha256(
         np.ascontiguousarray(hyb).tobytes()
         + np.ascontiguousarray(H_dft).tobytes()
+        # the Coulomb tensor and shell rotation steer the basis choice, but only when the choice looks at them
+        + (np.ascontiguousarray(u4).tobytes() + repr(float(u_densify)).encode() if u_aware else b"")
+        + (np.ascontiguousarray(rot_to_spherical).tobytes() if u_aware and rot_to_spherical is not None else b"")
         + repr(
             (
                 float(symm_prec),

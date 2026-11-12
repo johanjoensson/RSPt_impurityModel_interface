@@ -235,3 +235,20 @@ def test_damped_double_counting_is_added_in_one_basis(tmp_path, monkeypatch):
         c1, c2 = (np.asarray(f[f"t {it}/corr_to_cf"]) for it in (1, 2))
     assert np.abs(c1 - c2).max() > 1e-2, "the two iterations must fit in different bases"
     np.testing.assert_allclose(second["sig_dc"], d1 + 0.5 * (d2 - d1), atol=1e-10)
+
+
+@pytest.mark.parametrize(("line", "expected"), [("3 3", 2.0), ("3 3 u_densify 4", 4.0), ("3 3 u_densify inf", np.inf)])
+def test_the_fit_gets_the_interaction_and_the_densification_budget(tmp_path, monkeypatch, line, expected):
+    seen = {}
+
+    def get_ed_h0(*args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop after the fit call")
+
+    monkeypatch.setattr(lib, "get_ed_h0", get_ed_h0)
+    with pytest.raises(RuntimeError, match="stop after the fit call"):
+        _solve(tmp_path, monkeypatch, line, _problem(3e-3))
+    assert seen["u_densify"] == expected
+    assert seen["u4"].shape == (N,) * 4
+    # corr_to_cf and corr_to_spherical are the identity here
+    assert np.allclose(seen["rot_to_spherical"], np.eye(N))

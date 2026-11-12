@@ -163,7 +163,8 @@ def test_solver_line_attrs_reproduces_the_flat_record():
     assert attrs["gf_prune_tol"] is None and attrs["gf_refine_rounds"] is None and attrs["cost_budget"] is None
     assert attrs["symm_prec"] == pytest.approx(1e-6)  # d9fbbef: the symmetry-detection tolerance is archived too
     assert attrs["interaction_merges_blocks"] is True
-    assert len(attrs) == 36
+    assert attrs["u_densify"] == pytest.approx(2.0)
+    assert len(attrs) == 37
     assert "n_baths" not in attrs
     assert solver_line_attrs(fit_options, basis, solver, n_baths=10)["n_baths"] == 10
 
@@ -602,3 +603,22 @@ def test_symm_prec_accepts_fortran_exponents_and_any_case(text):
 
 def test_symm_prec_below_the_default_keeps_merging_on():
     assert parse_solver_line("8 10 symm_prec 1e-9")[3].interaction_merges_blocks is True
+
+
+def test_u_densify_defaults_to_two_and_parses_inf():
+    assert parse_solver_line("8 10")[2]["u_densify"] == pytest.approx(2.0)
+    assert parse_solver_line("8 10 u_densify 3.5")[2]["u_densify"] == pytest.approx(3.5)
+    assert parse_solver_line("8 10 U_DENSIFY 1d0")[2]["u_densify"] == pytest.approx(1.0)
+    assert parse_solver_line("8 10 u_densify inf")[2]["u_densify"] == float("inf")
+
+
+@pytest.mark.parametrize("line", ["8 10 u_densify", "8 10 u_densify abc", "8 10 u_densify 0.5", "8 10 u_densify nan"])
+def test_u_densify_rejects_missing_or_unusable_values(line):
+    with pytest.raises(RuntimeError, match="u_densify"):
+        parse_solver_line(line)
+
+
+def test_u_densify_is_archived_and_printed():
+    _, _, fit_options, basis, solver = parse_solver_line("8 10 u_densify 3")
+    attrs = solver_line_attrs(fit_options, basis, solver, n_baths=10)
+    assert attrs["u_densify"] == pytest.approx(3.0)
