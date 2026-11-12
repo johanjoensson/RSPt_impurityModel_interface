@@ -51,7 +51,6 @@ def _arrays():
         sig_static=np.zeros((N_ORB, N_ORB), order="F", dtype=complex),
         sig_dc=np.zeros((N_ORB, N_ORB), order="F", dtype=complex),
         corr_to_spherical_in=np.eye(N_ORB, dtype=complex, order="F"),
-        corr_to_cf_in=np.eye(N_ORB, dtype=complex, order="F"),
     )
 
 

@@ -91,7 +91,7 @@ def run_double_counting(
     *,
     guess,
     blocks,
-    corr_to_cf,
+    corr_to_solver,
     w,
     tau,
     nominal_total,
@@ -126,7 +126,7 @@ def run_double_counting(
             verbosity=verbosity,
             cap_ledger=cap_ledger,
         )
-        previous = archive.previous_damped_dc(filename, label, comm, corr_to_cf=corr_to_cf)
+        previous = archive.previous_damped_dc(filename, label, comm, corr_to_solver=corr_to_solver)
         damped = converged if previous is None else previous + request.alpha * (converged - previous)
         # The solver neglected the couplings between blocks, so the double counting carries none.
         damped = project_to_blocks(damped, blocks)

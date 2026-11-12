@@ -167,7 +167,7 @@ def write_problem(
     v,
     u4,
     dc,
-    corr_to_cf,
+    corr_to_solver,
     rot_to_spherical,
     layout,
 ):
@@ -176,7 +176,7 @@ def write_problem(
     ``line`` is the parsed :class:`~impurityModel_interface.solver_line.SolverLine` (with the
     temperature on its basis options), ``layout`` the ``(impurity, valence, conduction)`` orbital
     indices.  Next to the solver's own record this stamps the fit options, the bath size, the
-    ``corr_to_cf`` rotation (so the archive is self-contained) and the versions that made it.
+    ``corr_to_solver`` rotation (so the archive is self-contained) and the versions that made it.
     """
     impurity, valence, conduction = layout
     with h5.File(filename, "a") as f:
@@ -210,7 +210,7 @@ def write_problem(
                 group.attrs[f"{package} version"] = package_version(package)
             except PackageNotFoundError:
                 pass
-        write_dataset(group, "corr_to_cf", corr_to_cf)
+        write_dataset(group, "corr_to_solver", corr_to_solver)
 
 
 def write_selfenergy(filename, label, results, sig_static, sig_real, sig, rotate_green, u):
@@ -235,14 +235,14 @@ def write_selfenergy(filename, label, results, sig_static, sig_real, sig, rotate
 # --- double counting -----------------------------------------------------------------------
 
 
-def previous_damped_dc(filename, label, comm, corr_to_cf=None):
+def previous_damped_dc(filename, label, comm, corr_to_solver=None):
     """The double counting this interface returned on the most recent earlier iteration.
 
     Stored in the solver basis of the iteration that produced it, which is the fitting basis and
-    changes from one iteration to the next.  With ``corr_to_cf`` (the current iteration's
+    changes from one iteration to the next.  With ``corr_to_solver`` (the current iteration's
     solver-basis-to-correlated-basis rotation) the stored matrix is carried through the correlated
     basis into the current solver basis, so the damping adds like to like; a group without a stored
-    ``corr_to_cf`` is returned as it is.
+    ``corr_to_solver`` is returned as it is.
 
     This -- not the ``sig_dc`` RSPt hands in -- is the anchor the damping pulls toward
     (``doc/double_counting.md``).  Searches backwards from the current iteration for the newest group
@@ -256,10 +256,12 @@ def previous_damped_dc(filename, label, comm, corr_to_cf=None):
                 name = _group_name(label, iteration)
                 if name in f and "DC damped" in f[name]:
                     previous = np.asarray(f[name]["DC damped"])
-                    if corr_to_cf is not None and "corr_to_cf" in f[name]:
-                        previous_c = np.asarray(f[name]["corr_to_cf"])
-                        if previous_c.shape == np.shape(corr_to_cf) and previous.shape == previous_c.shape:
-                            return rotate_matrix(rotate_matrix(previous, np.conj(previous_c.T)), np.asarray(corr_to_cf))
+                    if corr_to_solver is not None and "corr_to_solver" in f[name]:
+                        previous_c = np.asarray(f[name]["corr_to_solver"])
+                        if previous_c.shape == np.shape(corr_to_solver) and previous.shape == previous_c.shape:
+                            return rotate_matrix(
+                                rotate_matrix(previous, np.conj(previous_c.T)), np.asarray(corr_to_solver)
+                            )
                         print(
                             f"The stored double counting of {name} has another basis shape; "
                             "damping against it unrotated.",

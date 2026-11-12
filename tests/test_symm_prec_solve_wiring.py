@@ -68,7 +68,9 @@ def _hermitian(seed):
     return 0.3 * (a + a.conj().T)
 
 
-def _solve(shared_tmp_path, monkeypatch, solver_line, problem, dc_flag=0, dc_line="occ 3", sig_dc=None):
+def _solve(
+    shared_tmp_path, monkeypatch, solver_line, problem, dc_flag=0, dc_line="occ 3", sig_dc=None, corr_to_spherical=None
+):
     monkeypatch.chdir(shared_tmp_path)
     H, hyb, w, eim = problem
     n_w = len(w)
@@ -83,8 +85,9 @@ def _solve(shared_tmp_path, monkeypatch, solver_line, problem, dc_flag=0, dc_lin
         sig_real=np.zeros((N, N, n_w), order="F", dtype=complex),
         sig_static=np.zeros((N, N), order="F", dtype=complex),
         sig_dc=sig_dc,
-        corr_to_spherical_in=np.eye(N, dtype=complex, order="F"),
-        corr_to_cf_in=np.eye(N, dtype=complex, order="F"),
+        corr_to_spherical_in=np.asfortranarray(np.eye(N) if corr_to_spherical is None else corr_to_spherical).astype(
+            complex
+        ),
     )
     status = solve.solve(
         label="t",
@@ -128,12 +131,12 @@ def _install_spies(monkeypatch, dc_in_corr=None, sigma_static_cf=None):
         calls.append(("fit_h0", options.symm_prec))
         return real_fit_h0(*args, **kwargs)
 
-    def corr_to_cf_of(model):
+    def corr_to_solver_of(model):
         return model.rot_to_spherical.conj().T  # corr_to_spherical_in is the identity
 
     def fixed_occupation_dc(model, basis, solver, **kwargs):
         calls.append(("dc", basis.interaction_merges_blocks))
-        return rotate_matrix(dc_in_corr.pop(0), corr_to_cf_of(model)), 3
+        return rotate_matrix(dc_in_corr.pop(0), corr_to_solver_of(model)), 3
 
     def calc_selfenergy(model, meshes, basis, solver, **kwargs):
         calls.append(("sigma", basis.interaction_merges_blocks))
@@ -195,12 +198,12 @@ def test_the_self_energy_comes_back_in_the_correlated_basis(shared_tmp_path, mon
     _install_spies(monkeypatch, sigma_static_cf=sigma)
     out = _solve(shared_tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(3e-3, _unitary(7)))
     with h5.File(shared_tmp_path / "impurityModel_data.h5", "r") as f:
-        corr_to_cf = np.asarray(f["t 1/corr_to_cf"])
+        corr_to_solver = np.asarray(f["t 1/corr_to_solver"])
     # the fit rotated the problem, so the composed rotation is not the identity ...
-    assert np.abs(corr_to_cf - np.eye(N)).max() > 1e-2
+    assert np.abs(corr_to_solver - np.eye(N)).max() > 1e-2
     # ... and the solver's answer is carried back through it
-    np.testing.assert_allclose(out["sig_static"], corr_to_cf @ sigma @ corr_to_cf.conj().T, atol=1e-12)
-    np.testing.assert_allclose(out["sig"][:, :, 0], corr_to_cf @ sigma @ corr_to_cf.conj().T, atol=1e-12)
+    np.testing.assert_allclose(out["sig_static"], corr_to_solver @ sigma @ corr_to_solver.conj().T, atol=1e-12)
+    np.testing.assert_allclose(out["sig"][:, :, 0], corr_to_solver @ sigma @ corr_to_solver.conj().T, atol=1e-12)
 
 
 def test_archive_records_the_requested_value_and_the_measured_flag(shared_tmp_path, monkeypatch):
@@ -222,7 +225,7 @@ def test_damped_double_counting_is_added_in_one_basis(shared_tmp_path, monkeypat
     np.testing.assert_allclose(first["sig_dc"], d1, atol=1e-10)
     second = _solve(shared_tmp_path, monkeypatch, "3 3", _problem(0.3, _unitary(22), connect_last=True), dc_flag=1)
     with h5.File(shared_tmp_path / "impurityModel_data.h5", "r") as f:
-        c1, c2 = (np.asarray(f[f"t {it}/corr_to_cf"]) for it in (1, 2))
+        c1, c2 = (np.asarray(f[f"t {it}/corr_to_solver"]) for it in (1, 2))
     assert np.abs(c1 - c2).max() > 1e-2, "the two iterations must fit in different bases"
     np.testing.assert_allclose(second["sig_dc"], d1 + 0.5 * (d2 - d1), atol=1e-10)
 
@@ -241,5 +244,23 @@ def test_the_fit_gets_the_interaction_and_the_densification_budget(shared_tmp_pa
         _solve(shared_tmp_path, monkeypatch, line, _problem(3e-3))
     assert seen["options"].u_densify == expected
     assert seen["u4"].shape == (N,) * 4
-    # corr_to_cf and corr_to_spherical are the identity here
+    # corr_to_spherical is the identity here and goes to the fit as it is
     assert np.allclose(seen["rot_to_spherical"], np.eye(N))
+
+
+def test_the_fit_gets_rspts_data_and_spherical_map_unrotated(shared_tmp_path, monkeypatch):
+    """The wrapper no longer pre-rotates: the fit sees RSPt's own basis, the map as RSPt sent it."""
+    seen = {}
+
+    def fit_h0(h_dft, hyb, *args, **kwargs):
+        seen.update(kwargs, h_dft=h_dft, hyb=hyb)
+        raise RuntimeError("stop after the fit call")
+
+    monkeypatch.setattr(solve, "fit_h0", fit_h0)
+    H, hyb, w, eim = _problem(3e-3, _unitary(5))
+    sph = _unitary(6)
+    with pytest.raises(RuntimeError, match="stop after the fit call"):
+        _solve(shared_tmp_path, monkeypatch, "3 3", (H, hyb, w, eim), corr_to_spherical=sph)
+    np.testing.assert_allclose(seen["h_dft"], H)
+    np.testing.assert_allclose(seen["hyb"], hyb)
+    np.testing.assert_allclose(seen["rot_to_spherical"], sph)

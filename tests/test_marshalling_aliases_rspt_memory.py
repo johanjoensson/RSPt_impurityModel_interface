@@ -134,7 +134,9 @@ def test_the_views_are_writable_fortran_ordered_and_own_nothing(rspt_memory, mon
 
     _invoke(rspt_memory, monkeypatch, recorder)
     for name in COMPLEX_ARRAYS:
-        arr = seen[name if name not in ("corr_to_spherical", "corr_to_cf") else f"{name}_in"]
+        if name == "corr_to_cf":
+            continue  # accepted for RSPt's signature, deliberately not handed on
+        arr = seen[name if name != "corr_to_spherical" else f"{name}_in"]
         assert arr.dtype == complex, name
         assert arr.flags.writeable, name
         assert not arr.flags.owndata, f"{name} is a copy, not a view of RSPt's memory"
@@ -178,3 +180,17 @@ def test_the_fixed_width_fortran_strings_arrive_as_str(rspt_memory, monkeypatch)
 
 def test_the_return_value_is_forwarded(rspt_memory, monkeypatch):
     assert _invoke(rspt_memory, monkeypatch, lambda **kw: -3) == -3
+
+
+def test_corr_to_cf_is_accepted_but_not_handed_on(rspt_memory, monkeypatch):
+    """RSPt's corr_to_cf is no longer used; nothing may read it, so even NaN must not matter."""
+    seen = {}
+
+    def recorder(**kw):
+        seen.update(kw)
+        return 0
+
+    _raw(rspt_memory, "corr_to_cf")[:] = np.nan
+    _invoke(rspt_memory, monkeypatch, recorder)
+    assert not any("corr_to_cf" in key for key in seen)
+    assert all(np.all(np.isfinite(v)) for v in seen.values() if isinstance(v, np.ndarray) and v.dtype == complex)

@@ -117,6 +117,9 @@ def _run_impmod_ed(
     ``np.asarray(..., dtype=complex)`` anywhere below would silently break both, and no
     single-rank test would notice.
 
+    ``rspt_corr_to_cf`` is part of RSPt's signature but is deliberately not read: the fitting
+    basis is chosen from the data in RSPt's correlated basis.
+
     ``n_iw``, ``n_w``, ``size_real`` and ``size_complex`` exist only to compute the byte
     counts below, and are deliberately not forwarded.
     """
@@ -140,7 +143,6 @@ def _run_impmod_ed(
         sig_static=view(rspt_sig_static, (n_orb, n_orb)),
         sig_dc=view(rspt_sig_dc, (n_orb, n_orb)),
         corr_to_spherical_in=view(rspt_corr_to_spherical, (n_orb, n_orb_full)),
-        corr_to_cf_in=view(rspt_corr_to_cf, (n_orb, n_rot_cols)),
         n_orb=n_orb,
         n_rot_cols=n_rot_cols,
         n_orb_full=n_orb_full,

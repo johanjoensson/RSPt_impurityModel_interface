@@ -38,9 +38,9 @@ from .mpi import on_root
 from .solver_line import format_settings_header, parse_solver_line, with_temperature
 
 
-def reconstruct_rotations(corr_to_spherical_in, corr_to_cf_in, n_orb, n_rot_cols, n_orb_full):
+def reconstruct_corr_to_spherical(corr_to_spherical_in, n_orb, n_rot_cols, n_orb_full):
     """
-    Return (corr_to_spherical, corr_to_cf) with both spin blocks present.
+    Return ``corr_to_spherical`` with both spin blocks present.
 
     RSPt dimensions the rotation matrices with nspmat spins (1 for
     non-spin-polarized calculations without SOC, 2 otherwise), while the
@@ -49,31 +49,29 @@ def reconstruct_rotations(corr_to_spherical_in, corr_to_cf_in, n_orb, n_rot_cols
     (n_rot_cols == n_orb/2), duplicate it onto the spin-up block; the
     correlated basis rows are ordered [spin-down block, spin-up block].
 
+    RSPt's ``corr_to_cf`` is not used: the fitting basis is chosen from the data in
+    RSPt's correlated basis (see :func:`prepare_problem`).  Its column count
+    ``n_rot_cols`` still tells how many spins RSPt sent.
+
     Parameters:
     corr_to_spherical_in -- (n_orb, n_orb_full) rotation from the correlated
                             basis to spherical harmonics, n_orb_full counts
                             nspmat spins.
-    corr_to_cf_in        -- (n_orb, n_rot_cols) rotation from the correlated
-                            basis to the CF basis, n_rot_cols counts nspmat
-                            spins.
     n_orb                -- Number of correlated spin-orbitals (2 spins).
-    n_rot_cols           -- Number of CF columns sent by RSPt.
+    n_rot_cols           -- Number of CF columns sent by RSPt (spin count only).
     n_orb_full           -- Spherical-harmonics dimension sent by RSPt.
     """
     if n_rot_cols == n_orb:
         # The matrices already carry both spins (spin-polarized or SOC).
         # corr_to_spherical may be rectangular (n_orb < n_orb_full) when the
         # correlated set is a subset of the shell (e.g. t2g only).
-        return np.array(corr_to_spherical_in), np.array(corr_to_cf_in)
+        return np.array(corr_to_spherical_in)
     if 2 * n_rot_cols == n_orb:
         n_half = n_orb // 2
         corr_to_spherical = np.zeros((n_orb, 2 * n_orb_full), dtype=complex)
         corr_to_spherical[:n_half, :n_orb_full] = corr_to_spherical_in[:n_half, :]
         corr_to_spherical[n_half:, n_orb_full:] = corr_to_spherical_in[:n_half, :]
-        corr_to_cf = np.zeros((n_orb, n_orb), dtype=complex)
-        corr_to_cf[:n_half, :n_rot_cols] = corr_to_cf_in[:n_half, :]
-        corr_to_cf[n_half:, n_rot_cols:] = corr_to_cf_in[:n_half, :]
-        return corr_to_spherical, corr_to_cf
+        return corr_to_spherical
     raise RuntimeError(
         f"Inconsistent rotation shapes from RSPt: n_orb={n_orb}, "
         f"n_rot_cols={n_rot_cols}, n_orb_full={n_orb_full}; "
@@ -141,21 +139,20 @@ class Problem:
     solver: object
     #: Block partition of the fit; the double counting carries no coupling between blocks.
     blocks: list
-    #: Rotation from RSPt's correlated basis to the fitting basis.
-    corr_to_cf: np.ndarray
+    #: Rotation from the fitting basis (the solver's) to RSPt's correlated basis: columns are the
+    #: fitting orbitals expressed in RSPt's orbitals.
+    corr_to_solver: np.ndarray
     #: RSPt's incoming double counting, in the fitting basis.
     sig_dc: np.ndarray
     cap_ledger: CapLedger
 
 
-def prepare_problem(
-    *, label, line, dc_flag, h_dft, u4, hyb, w, corr_to_spherical, corr_to_cf, sig_dc, eim, tau, comm, verbosity
-):
-    """Fit h0 and build the solver model.  ``h_dft``, ``u4``, ``hyb`` are already in the CF basis.
+def prepare_problem(*, label, line, dc_flag, h_dft, u4, hyb, w, corr_to_spherical, sig_dc, eim, tau, comm, verbosity):
+    """Fit h0 and build the solver model.  ``h_dft``, ``u4``, ``hyb``, ``sig_dc`` are in RSPt's correlated basis.
 
     Prints the settings header, fits the bath (or reuses this iteration's fit), rotates everything
-    into the fitting basis -- the basis the solver then works in -- and writes the problem into the
-    archive.
+    into the fitting basis -- the basis the solver then works in; the fit chooses it from the data
+    as RSPt sends it -- and returns the problem there.
     """
     rank = comm.rank
     n_orb = h_dft.shape[0]
@@ -191,17 +188,12 @@ def prepare_problem(
             "WARNING: Your real frequency mesh is rather coarse. Recommended dE <= eim/5, "
             "in order to guarantee resolution of fine structures in the self energy."
         )
-    # Log how different RSPt's correlated basis and the CF basis are, so basis mixups are visible.
-    if rank == 0:
-        print(f"Max abs deviation of corr_to_cf from identity: {np.max(np.abs(corr_to_cf - np.eye(n_orb))):.3e}")
-        if corr_to_spherical.shape[0] != corr_to_spherical.shape[1]:
-            print(
-                "The correlated orbitals span only part of the shell "
-                f"({corr_to_spherical.shape[0]} of {corr_to_spherical.shape[1]} "
-                "spin-orbitals); the solver will skip the L/S/J observables."
-            )
-    # RSPt supplies the double counting in the corr basis, the solver needs it in the CF basis.
-    sig_dc_cf = rotate_matrix(sig_dc, corr_to_cf)
+    if rank == 0 and corr_to_spherical.shape[0] != corr_to_spherical.shape[1]:
+        print(
+            "The correlated orbitals span only part of the shell "
+            f"({corr_to_spherical.shape[0]} of {corr_to_spherical.shape[1]} "
+            "spin-orbitals); the solver will skip the L/S/J observables."
+        )
 
     fitted = fit_h0(
         h_dft,
@@ -211,7 +203,7 @@ def prepare_problem(
         eim,
         line.fit,
         u4=u4,
-        rot_to_spherical=np.conj(corr_to_cf.T) @ corr_to_spherical,
+        rot_to_spherical=corr_to_spherical,
         label=label,
         filename=filename,
         verbose=(verbosity >= 1 or dc_flag == 1),
@@ -220,11 +212,14 @@ def prepare_problem(
     )
     # The fit neglected the couplings between blocks (symm_prec) in its own basis, in which the
     # impurity block, the hopping and the double counting are exactly block diagonal.  That is the
-    # basis the solver must work in: rotated back to the CF basis the neglected couplings are
-    # spread over all orbitals again and the solver would merge the blocks.  From here on the "CF"
-    # basis is the fitting basis, so the interaction, the Green's functions and the rotation back
-    # to RSPt's correlated basis (corr_to_cf) all follow it.
+    # basis the solver must work in: rotated back to RSPt's basis the neglected couplings are
+    # spread over all orbitals again and the solver would merge the blocks.  So the interaction, the
+    # Green's functions and the double counting follow the fit, and ``corr_to_solver`` is the
+    # rotation back to RSPt's correlated basis.
     rotation = fitted.rotation
+    if rank == 0:
+        deviation = np.max(np.abs(rotation - np.eye(n_orb)))
+        print(f"Max abs deviation of the fitting basis from RSPt's correlated basis: {deviation:.3e}")
     blocks = fitted.block_structure.blocks
     n_total = fitted.H_solver.shape[0]
     full_rotation = np.eye(n_total, dtype=complex)
@@ -235,8 +230,8 @@ def prepare_problem(
     hyb = rotate_Greens_function(hyb, rotation)
     h_dft = rotate_matrix(h_dft, rotation)
     u4 = rotate_4index_U(u4, rotation)
-    sig_dc_cf = project_to_blocks(rotate_matrix(sig_dc_cf, rotation), blocks)
-    corr_to_cf = corr_to_cf @ rotation
+    sig_dc_fit = project_to_blocks(rotate_matrix(sig_dc, rotation), blocks)
+    corr_to_solver = rotation
     # Only if the fit neglected something are its one-body blocks authoritative and the interaction
     # must not merge them back; otherwise the safety net stays on.
     basis = replace(basis, interaction_merges_blocks=not fitted.neglected_couplings)
@@ -258,18 +253,18 @@ def prepare_problem(
     # impurity/bath orbital layout from the block sizes.  model.h0 is the raw h_dft + bath (RSPt
     # passes h_dft WITHOUT the double counting subtracted) and model.dc is RSPt's current dc:
     # calc_selfenergy subtracts it and the fixed_*_dc searches use it as their guess.
-    rot_to_spherical = np.conj(corr_to_cf.T) @ corr_to_spherical
+    rot_to_spherical = np.conj(rotation.T) @ corr_to_spherical
     model = ImpurityModel.from_blocks(
         H_imp,
         v,
         fitted.H_bath,
         u4=u4,
-        dc=sig_dc_cf,
+        dc=sig_dc_fit,
         rot_to_spherical=rot_to_spherical,
         bath_valence_conduction=(fitted.valence_bath_indices, fitted.conduction_bath_indices),
     )
     return (
-        Problem(model, basis, solver, blocks, corr_to_cf, sig_dc_cf, cap_ledger),
+        Problem(model, basis, solver, blocks, corr_to_solver, sig_dc_fit, cap_ledger),
         dict(
             line=replace(line, basis=basis),
             fitted=fitted,
@@ -292,7 +287,9 @@ def _report_fit(problem, context, *, w, eim, tau, label, comm):
     fit_dev = np.max(np.abs(hyb_fit - hyb))
     fit_dev_occ = np.max(np.abs(hyb_fit[w <= 0] - hyb[w <= 0]))
     print(f"Max abs deviation of the fitted hybridization function: {fit_dev_occ:.6f} (w <= 0), {fit_dev:.6f} (all w)")
-    save_Greens_function(rotate_Greens_function(hyb_fit, np.conj(problem.corr_to_cf.T)), w, "hyb-fit", label.strip())
+    save_Greens_function(
+        rotate_Greens_function(hyb_fit, np.conj(problem.corr_to_solver.T)), w, "hyb-fit", label.strip()
+    )
     # Is the occupation fixed_occupation_dc pins to the true DFT impurity occupation, or an artefact of
     # how finely the bath was discretized?  Diagnostic only; see dc_reference.report_continuum_reference.
     n0_disc = discretized_impurity_occupation(problem.model, tau)
@@ -314,7 +311,6 @@ def solve(
     sig_static,
     sig_dc,
     corr_to_spherical_in,
-    corr_to_cf_in,
     n_orb,
     n_rot_cols,
     n_orb_full,
@@ -330,11 +326,8 @@ def solve(
     """
     comm = MPI.COMM_WORLD
     rank = comm.rank
-    corr_to_spherical, corr_to_cf = reconstruct_rotations(
-        corr_to_spherical_in, corr_to_cf_in, n_orb, n_rot_cols, n_orb_full
-    )
+    corr_to_spherical = reconstruct_corr_to_spherical(corr_to_spherical_in, n_orb, n_rot_cols, n_orb_full)
     comm.Bcast(corr_to_spherical)
-    comm.Bcast(corr_to_cf)
     comm.Bcast(h_dft)
     comm.Bcast(u4)
     comm.Bcast(sig_dc)
@@ -344,10 +337,6 @@ def solve(
     sig_python = np.moveaxis(sig, -1, 0)
     sig_real_python = np.moveaxis(sig_real, -1, 0)
     hyb = np.moveaxis(hyb, -1, 0)
-
-    hyb = rotate_Greens_function(hyb, corr_to_cf)
-    h_dft = rotate_matrix(h_dft, corr_to_cf)
-    u4 = rotate_4index_U(u4, corr_to_cf)
 
     with redirected_stdout(label, dc_flag, comm, verbosity):
         verbosity = comm.bcast(verbosity)
@@ -367,7 +356,6 @@ def solve(
             hyb=hyb,
             w=w,
             corr_to_spherical=corr_to_spherical,
-            corr_to_cf=corr_to_cf,
             sig_dc=sig_dc,
             eim=eim,
             tau=tau,
@@ -392,7 +380,7 @@ def solve(
                 v=context["v"],
                 u4=context["u4"],
                 dc=problem.sig_dc,
-                corr_to_cf=problem.corr_to_cf,
+                corr_to_solver=problem.corr_to_solver,
                 rot_to_spherical=context["rot_to_spherical"],
                 layout=(fitted.impurity_indices, fitted.valence_bath_indices, fitted.conduction_bath_indices),
             ),
@@ -435,7 +423,7 @@ def run_double_counting(request, problem, context, *, label, sig_dc, w, tau, com
         problem.solver,
         guess=problem.sig_dc,
         blocks=problem.blocks,
-        corr_to_cf=problem.corr_to_cf,
+        corr_to_solver=problem.corr_to_solver,
         w=w,
         tau=tau,
         nominal_total=sum(problem.basis.nominal_occ.values()),
@@ -447,7 +435,7 @@ def run_double_counting(request, problem, context, *, label, sig_dc, w, tau, com
     )
     if damped is not None:
         # The double counting is calculated in the fitting basis, RSPt expects it in the corr basis.
-        sig_dc[:, :] = rotate_matrix(damped, np.conj(problem.corr_to_cf.T))
+        sig_dc[:, :] = rotate_matrix(damped, np.conj(problem.corr_to_solver.T))
     comm.barrier()
     return 0
 
@@ -469,7 +457,7 @@ def run_selfenergy(
             cap_ledger=problem.cap_ledger,
         )
         # calc_selfenergy returns everything in the fitting basis; RSPt expects the corr basis.
-        u = np.conj(problem.corr_to_cf.T)
+        u = np.conj(problem.corr_to_solver.T)
         if comm.rank == 0:
             sig_static[:, :] = rotate_matrix(results["sigma_static"], u)
             sig_python[:, :, :] = rotate_Greens_function(results["sigma"], u)

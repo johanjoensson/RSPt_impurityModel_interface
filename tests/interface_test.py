@@ -45,7 +45,7 @@ def read_references(filename, label, iteration):
     with h5.File(filename, "r") as f:
         g = f[f"{label} {iteration}"]
         return {
-            "corr_to_cf": g["corr_to_cf"][...],
+            "corr_to_solver": g["corr_to_solver"][...],
             "sigma_static_ref": g["Sigma Static"][...] if "Sigma Static" in g else None,
             "sigma_ref": g["Sigma Matsubara"][...] if "Sigma Matsubara" in g else None,
             "sigma_real_ref": g["Sigma real"][...] if "Sigma real" in g else None,
@@ -65,9 +65,9 @@ def test_selfenergy_against_reference():
 
     if MPI.COMM_WORLD.rank != 0:
         return
-    # calc_selfenergy returns the self-energy in its input (CF) basis; the
+    # calc_selfenergy returns the self-energy in its input (fitting) basis; the
     # stored references are in the corr basis.
-    u = np.conj(data["corr_to_cf"].T)
+    u = np.conj(data["corr_to_solver"].T)
     sigma_static = rotate_matrix(results["sigma_static"], u)
     sigma = rotate_Greens_function(results["sigma"], u)
     sigma_real = rotate_Greens_function(results["sigma_real"], u)

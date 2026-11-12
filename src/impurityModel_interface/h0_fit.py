@@ -17,7 +17,7 @@ from .mpi import on_root
 
 @dataclass
 class FittedH0:
-    """The fitted blocks, in RSPt's correlated-to-CF input basis (rotate with ``rotation``)."""
+    """The fitted blocks, in the basis the fit started from, RSPt's correlated basis (rotate with ``rotation``)."""
 
     H_imp: np.ndarray
     impurity_indices: list
@@ -58,7 +58,7 @@ def fit_h0(
     ----------
     h_dft, hyb : np.ndarray
         Local Hamiltonian and real-frequency hybridization function (``hyb`` has the frequency
-        first), in the CF basis.
+        first), in RSPt's correlated basis.
     n_baths : int
         Bath states per impurity orbital.
     options : rspt2spectra.FitOptions
@@ -138,7 +138,7 @@ def fit_h0(
 
     # rspt2spectra turns the flattened star fit into the requested geometry and assembles h0,
     # including the star reference that classifies bath states as valence/conduction.
-    (H, _H_star, impurity, valence, conduction, v, H_bath, H_imp) = assemble_h0(
+    H, _H_star, impurity, valence, conduction, v, H_bath, H_imp = assemble_h0(
         bath_fit.ebs_star,
         bath_fit.vs_star,
         bath_fit.shifts,

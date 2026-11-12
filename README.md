@@ -44,8 +44,12 @@ user supplied `Irr` projections, and the relativistic JJ basis, with or
 without spin polarization and spin-orbit coupling. The wrapper handles all of
 these: RSPt sends the rotation matrices with one spin block when the
 calculation is neither spin polarized nor relativistic (`nspmat = 1`), and the
-wrapper duplicates that block onto both spins (`reconstruct_rotations` in
-`solve.py`); otherwise the matrices are used as received. The impurityModel ED
+wrapper duplicates that block onto both spins (`reconstruct_corr_to_spherical`
+in `solve.py`); otherwise the matrices are used as received. RSPt's
+`corr_to_cf` is accepted but not used: the fitting basis is chosen from the
+hybridization function, `h_dft` and the Coulomb tensor as RSPt sends them, and
+the archive stores the rotation from it back to RSPt's basis as
+`corr_to_solver`. The impurityModel ED
 solver requires the cluster to contain exactly one correlated orbital set and
 nothing else. When the correlated set spans only part of a shell, the
 rotation to spherical harmonics is rectangular and impurityModel skips the
