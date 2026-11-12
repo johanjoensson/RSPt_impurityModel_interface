@@ -55,8 +55,8 @@ def _arrays():
     )
 
 
-def _call(tmp_path, monkeypatch, solver_line):
-    monkeypatch.chdir(tmp_path)
+def _call(shared_tmp_path, monkeypatch, solver_line):
+    monkeypatch.chdir(shared_tmp_path)
     return solve.solve(
         label="Ni-3d",
         solver_line=solver_line,
@@ -72,18 +72,18 @@ def _call(tmp_path, monkeypatch, solver_line):
     )
 
 
-def test_an_impossible_nominal_occupation_is_rejected(tmp_path, monkeypatch, restore_stdout):
+def test_an_impossible_nominal_occupation_is_rejected(shared_tmp_path, monkeypatch, restore_stdout):
     """Eight electrons will not fit in four spin-orbitals, and solve says so itself."""
     with pytest.raises(RuntimeError, match="out of bounds"):
-        _call(tmp_path, monkeypatch, "8 10")
+        _call(shared_tmp_path, monkeypatch, "8 10")
 
 
-def test_a_negative_nominal_occupation_is_rejected(tmp_path, monkeypatch, restore_stdout):
+def test_a_negative_nominal_occupation_is_rejected(shared_tmp_path, monkeypatch, restore_stdout):
     with pytest.raises(RuntimeError, match="out of bounds"):
-        _call(tmp_path, monkeypatch, "-1 10")
+        _call(shared_tmp_path, monkeypatch, "-1 10")
 
 
-def test_it_got_there_without_a_cffi_handle(tmp_path, monkeypatch, restore_stdout):
+def test_it_got_there_without_a_cffi_handle(shared_tmp_path, monkeypatch, restore_stdout):
     """The point of the split: the stub would have raised long before the bounds check.
 
     ``_FFIStub.string`` raises RuntimeError("ffi.string is only available when embedded in
@@ -91,12 +91,12 @@ def test_it_got_there_without_a_cffi_handle(tmp_path, monkeypatch, restore_stdou
     instead of the occupation complaint.
     """
     with pytest.raises(RuntimeError) as excinfo:
-        _call(tmp_path, monkeypatch, "8 10")
+        _call(shared_tmp_path, monkeypatch, "8 10")
     assert "only available when embedded" not in str(excinfo.value)
 
 
-def test_it_opens_the_per_cluster_output_file(tmp_path, monkeypatch, restore_stdout):
+def test_it_opens_the_per_cluster_output_file(shared_tmp_path, monkeypatch, restore_stdout):
     """The redirect is part of solve, so a direct call produces the same .out file."""
     with pytest.raises(RuntimeError):
-        _call(tmp_path, monkeypatch, "8 10")
-    assert (tmp_path / "impurityModel-Ni-3d.out").exists()
+        _call(shared_tmp_path, monkeypatch, "8 10")
+    assert (shared_tmp_path / "impurityModel-Ni-3d.out").exists()

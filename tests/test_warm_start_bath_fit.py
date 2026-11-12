@@ -54,8 +54,8 @@ def _fit_group(path, it):
         return {key: g.attrs[key] for key in ("warm start", "cost warm", "cost global")}, int(f.attrs["last iteration"])
 
 
-def test_first_iteration_is_cold_and_the_next_is_warm(tmp_path):
-    path = tmp_path / "a.h5"
+def test_first_iteration_is_cold_and_the_next_is_warm(shared_tmp_path):
+    path = shared_tmp_path / "a.h5"
     _fit(path, 1.15)
     audit, last = _fit_group(path, 1)
     assert last == 1
@@ -69,16 +69,16 @@ def test_first_iteration_is_cold_and_the_next_is_warm(tmp_path):
     assert np.isfinite(audit["cost warm"][0])
 
 
-def test_cold_fit_ignores_the_previous_fit(tmp_path):
-    path = tmp_path / "a.h5"
+def test_cold_fit_ignores_the_previous_fit(shared_tmp_path):
+    path = shared_tmp_path / "a.h5"
     _fit(path, 1.15)
     _fit(path, 1.154, warm_start=False)
     audit, _ = _fit_group(path, 2)
     assert list(audit["warm start"]) == ["cold"]
 
 
-def test_freezing_still_holds_the_previous_energies(tmp_path):
-    path = tmp_path / "a.h5"
+def test_freezing_still_holds_the_previous_energies(shared_tmp_path):
+    path = shared_tmp_path / "a.h5"
     first = _fit(path, 1.15)
     second = _fit(path, 1.3, freeze_bath_energies=True)
     audit, _ = _fit_group(path, 2)
@@ -86,13 +86,15 @@ def test_freezing_still_holds_the_previous_energies(tmp_path):
     np.testing.assert_allclose(np.unique(np.diag(second.H_bath).round(10)), np.unique(np.diag(first.H_bath).round(10)))
 
 
-def test_the_same_hybridization_reuses_the_stored_fit(tmp_path, capsys):
+def test_the_same_hybridization_reuses_the_stored_fit(shared_tmp_path, capsys):
     # The DC pass and the self-energy pass of one iteration share one fit; no warm start runs.
-    path = tmp_path / "a.h5"
+    path = shared_tmp_path / "a.h5"
     first = _fit(path, 1.15)
     capsys.readouterr()
     again = _fit(path, 1.15)
-    assert "REUSED" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    if MPI.COMM_WORLD.rank == 0:  # only the root reports
+        assert "REUSED" in out
     np.testing.assert_array_equal(again.H_bath, first.H_bath)
     with h5.File(path, "r") as f:
         assert int(f.attrs["last iteration"]) == 1

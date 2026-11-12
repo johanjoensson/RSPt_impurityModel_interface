@@ -7,7 +7,6 @@ the archive are real.
 """
 
 import sys
-from pathlib import Path
 
 import h5py as h5
 import numpy as np
@@ -15,7 +14,6 @@ import pytest
 from scipy.sparse.csgraph import connected_components
 
 pytest.importorskip("mpi4py")
-from mpi4py import MPI
 from rspt2spectra.utils import rotate_matrix
 
 from impurityModel_interface import double_counting, solve
@@ -34,13 +32,6 @@ def restore_stdout():
         except Exception:
             pass
     sys.stdout = saved
-
-
-@pytest.fixture
-def tmp_path(tmp_path_factory):
-    """One working directory for all ranks: only rank 0 writes the archive the tests read back."""
-    path = MPI.COMM_WORLD.bcast(str(tmp_path_factory.mktemp("wiring")), root=0)
-    return Path(path)
 
 
 def _problem(coupling, unitary=None, weak=True, connect_last=False):
@@ -77,8 +68,8 @@ def _hermitian(seed):
     return 0.3 * (a + a.conj().T)
 
 
-def _solve(tmp_path, monkeypatch, solver_line, problem, dc_flag=0, dc_line="occ 3", sig_dc=None):
-    monkeypatch.chdir(tmp_path)
+def _solve(shared_tmp_path, monkeypatch, solver_line, problem, dc_flag=0, dc_line="occ 3", sig_dc=None):
+    monkeypatch.chdir(shared_tmp_path)
     H, hyb, w, eim = problem
     n_w = len(w)
     sig_dc = np.zeros((N, N), order="F", dtype=complex) if sig_dc is None else sig_dc
@@ -166,10 +157,10 @@ def _install_spies(monkeypatch, dc_in_corr=None, sigma_static_cf=None):
 
 
 @pytest.mark.parametrize("key", ["symm_prec", "symmetry_prec"])
-def test_value_reaches_the_fit_and_the_solver_is_told_blocks_are_authoritative(tmp_path, monkeypatch, key):
+def test_value_reaches_the_fit_and_the_solver_is_told_blocks_are_authoritative(shared_tmp_path, monkeypatch, key):
     sigma = _hermitian(1)
     calls = _install_spies(monkeypatch, sigma_static_cf=sigma)
-    _solve(tmp_path, monkeypatch, f"3 3 {key} 0.05", _problem(3e-3))
+    _solve(shared_tmp_path, monkeypatch, f"3 3 {key} 0.05", _problem(3e-3))
     assert ("fit_h0", 0.05) in calls
     assert ("sigma", False) in calls
     # the model handed to the solver is block diagonal: the weak 2 <-> 3 couplings are gone
@@ -177,33 +168,33 @@ def test_value_reaches_the_fit_and_the_solver_is_told_blocks_are_authoritative(t
     assert models and all(n_h >= 2 for _, n_h, _ in models)
 
 
-def test_default_keeps_the_interaction_merging(tmp_path, monkeypatch):
+def test_default_keeps_the_interaction_merging(shared_tmp_path, monkeypatch):
     calls = _install_spies(monkeypatch, sigma_static_cf=_hermitian(1))
-    _solve(tmp_path, monkeypatch, "3 3", _problem(3e-3))
+    _solve(shared_tmp_path, monkeypatch, "3 3", _problem(3e-3))
     assert ("fit_h0", 1e-6) in calls
     assert ("sigma", True) in calls
 
 
-def test_a_raised_symm_prec_that_neglects_nothing_keeps_merging_on(tmp_path, monkeypatch):
+def test_a_raised_symm_prec_that_neglects_nothing_keeps_merging_on(shared_tmp_path, monkeypatch):
     calls = _install_spies(monkeypatch, sigma_static_cf=_hermitian(1))
-    _solve(tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(0.3, weak=False))
+    _solve(shared_tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(0.3, weak=False))
     assert ("sigma", True) in calls
 
 
-def test_the_double_counting_search_gets_the_same_flag(tmp_path, monkeypatch):
+def test_the_double_counting_search_gets_the_same_flag(shared_tmp_path, monkeypatch):
     calls = _install_spies(monkeypatch, dc_in_corr=[_hermitian(2)])
-    _solve(tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(3e-3), dc_flag=1)
+    _solve(shared_tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(3e-3), dc_flag=1)
     assert ("dc", False) in calls
     # ... and the double counting guess it starts from carries no coupling between the blocks
     models = [c for c in calls if c[0] == "model"]
     assert models and all(n_h >= 2 and n_dc >= 2 for _, n_h, n_dc in models)
 
 
-def test_the_self_energy_comes_back_in_the_correlated_basis(tmp_path, monkeypatch):
+def test_the_self_energy_comes_back_in_the_correlated_basis(shared_tmp_path, monkeypatch):
     sigma = _hermitian(3)
     _install_spies(monkeypatch, sigma_static_cf=sigma)
-    out = _solve(tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(3e-3, _unitary(7)))
-    with h5.File(tmp_path / "impurityModel_data.h5", "r") as f:
+    out = _solve(shared_tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(3e-3, _unitary(7)))
+    with h5.File(shared_tmp_path / "impurityModel_data.h5", "r") as f:
         corr_to_cf = np.asarray(f["t 1/corr_to_cf"])
     # the fit rotated the problem, so the composed rotation is not the identity ...
     assert np.abs(corr_to_cf - np.eye(N)).max() > 1e-2
@@ -212,32 +203,32 @@ def test_the_self_energy_comes_back_in_the_correlated_basis(tmp_path, monkeypatc
     np.testing.assert_allclose(out["sig"][:, :, 0], corr_to_cf @ sigma @ corr_to_cf.conj().T, atol=1e-12)
 
 
-def test_archive_records_the_requested_value_and_the_measured_flag(tmp_path, monkeypatch):
+def test_archive_records_the_requested_value_and_the_measured_flag(shared_tmp_path, monkeypatch):
     _install_spies(monkeypatch, sigma_static_cf=_hermitian(1))
-    _solve(tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(3e-3))
-    with h5.File(tmp_path / "impurityModel_data.h5", "r") as f:
+    _solve(shared_tmp_path, monkeypatch, "3 3 symm_prec 0.05", _problem(3e-3))
+    with h5.File(shared_tmp_path / "impurityModel_data.h5", "r") as f:
         attrs = f["t 1"].attrs
         assert attrs["symm_prec"] == pytest.approx(0.05)
         assert bool(attrs["interaction_merges_blocks"]) is False
 
 
-def test_damped_double_counting_is_added_in_one_basis(tmp_path, monkeypatch):
+def test_damped_double_counting_is_added_in_one_basis(shared_tmp_path, monkeypatch):
     """Each iteration's solver basis is its own fitting basis; the damping must not add matrices of
     different bases. With one block (strong coupling) the damped answer in RSPt's basis is exactly
     ``D1 + alpha (D2 - D1)``."""
     d1, d2 = _hermitian(11), _hermitian(12)
     _install_spies(monkeypatch, dc_in_corr=[d1, d2])
-    first = _solve(tmp_path, monkeypatch, "3 3", _problem(0.3, _unitary(21), connect_last=True), dc_flag=1)
+    first = _solve(shared_tmp_path, monkeypatch, "3 3", _problem(0.3, _unitary(21), connect_last=True), dc_flag=1)
     np.testing.assert_allclose(first["sig_dc"], d1, atol=1e-10)
-    second = _solve(tmp_path, monkeypatch, "3 3", _problem(0.3, _unitary(22), connect_last=True), dc_flag=1)
-    with h5.File(tmp_path / "impurityModel_data.h5", "r") as f:
+    second = _solve(shared_tmp_path, monkeypatch, "3 3", _problem(0.3, _unitary(22), connect_last=True), dc_flag=1)
+    with h5.File(shared_tmp_path / "impurityModel_data.h5", "r") as f:
         c1, c2 = (np.asarray(f[f"t {it}/corr_to_cf"]) for it in (1, 2))
     assert np.abs(c1 - c2).max() > 1e-2, "the two iterations must fit in different bases"
     np.testing.assert_allclose(second["sig_dc"], d1 + 0.5 * (d2 - d1), atol=1e-10)
 
 
 @pytest.mark.parametrize(("line", "expected"), [("3 3", 2.0), ("3 3 u_densify 4", 4.0), ("3 3 u_densify inf", np.inf)])
-def test_the_fit_gets_the_interaction_and_the_densification_budget(tmp_path, monkeypatch, line, expected):
+def test_the_fit_gets_the_interaction_and_the_densification_budget(shared_tmp_path, monkeypatch, line, expected):
     seen = {}
 
     def fit_h0(*args, **kwargs):
@@ -247,7 +238,7 @@ def test_the_fit_gets_the_interaction_and_the_densification_budget(tmp_path, mon
 
     monkeypatch.setattr(solve, "fit_h0", fit_h0)
     with pytest.raises(RuntimeError, match="stop after the fit call"):
-        _solve(tmp_path, monkeypatch, line, _problem(3e-3))
+        _solve(shared_tmp_path, monkeypatch, line, _problem(3e-3))
     assert seen["options"].u_densify == expected
     assert seen["u4"].shape == (N,) * 4
     # corr_to_cf and corr_to_spherical are the identity here
