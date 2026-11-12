@@ -33,6 +33,9 @@ restructured, because RSPt rewrites it for DC in {-4,-5,-14,-15}.
   to: the *summed* PT2 contribution of every determinant left out, which is what the energy error
   follows (impurityModel `doc/plans/cipsi_pt2_convergence.md`). This, not `de2_min`, is the
   accuracy control. Unset, the sector solves inherit the solver line's `e_pt2`.
+* `allow_memory_bound` — a bare flag. A search whose charge-sector ground states were stopped by the
+  memory guard rather than by convergence is refused by default (its energies are those of whatever
+  basis each expansion reached); with the flag the answer is accepted and a warning printed.
 
 ## What is refused, and why
 
@@ -40,6 +43,7 @@ restructured, because RSPt rewrites it for DC in {-4,-5,-14,-15}.
 * `e_pt2` with `occ`: `occ` solves on the production ground-state path and converges to the solver
   line's `e_pt2`; narrowing it there would change the criterion rather than its cost.
 * `e_pt2` with a static scheme: no solve.
+* `allow_memory_bound` with a static scheme: no solve.
 
 A modifier that reports as set and does nothing is the failure mode these refusals prevent.
 

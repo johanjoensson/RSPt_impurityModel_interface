@@ -33,7 +33,13 @@ def _banner(rank, headline, error, with_traceback):
 
 def _criterion(request, model, basis, solver, *, w, tau, nominal_total, comm, verbosity, cap_ledger):
     """Evaluate the requested criterion.  Returns ``(dc, sector)``; ``sector`` is ``None`` for static schemes."""
-    solves = {"comm": comm, "verbosity": verbosity, "return_sector": True, "cap_ledger": cap_ledger}
+    solves = {
+        "comm": comm,
+        "verbosity": verbosity,
+        "return_sector": True,
+        "cap_ledger": cap_ledger,
+        "allow_memory_bound": request.allow_memory_bound,
+    }
     if request.mode == "occupation":
         # Scale the shift search with the real-frequency mesh, so the steps suit any energy unit.
         bandwidth = w[-1] - w[0]

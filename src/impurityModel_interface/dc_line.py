@@ -24,6 +24,16 @@ class DCRequest:
     de2_min: Optional[float] = None
     #: Residual PT2 energy the charge-sector solves converge to (``None``: the solver line's).
     e_pt2_tol: Optional[float] = None
+    #: Accept an answer found from sector solves the memory guard stopped (a warning, not a refusal).
+    allow_memory_bound: bool = False
+
+
+def _take_flag(words, name):
+    """Remove the bare word ``name`` from ``words``; whether it was there."""
+    present = [i for i, word in enumerate(words) if word.lower() == name]
+    for i in reversed(present):
+        del words[i]
+    return bool(present)
 
 
 def _take(words, names, convert):
@@ -64,6 +74,7 @@ def parse_dc_line(dc_line):
     alpha = _take(words, {"alpha"}, _number)
     de2_min = _take(words, {"de2_min"}, _positive)
     e_pt2_tol = _take(words, {"e_pt2", "e_pt2_tol"}, _positive)
+    allow_memory_bound = _take_flag(words, "allow_memory_bound")
     head = words[0].lower() if words else None
     if head == "gap":
         if len(words) > 2:
@@ -95,6 +106,8 @@ def parse_dc_line(dc_line):
             f"'de2_min' sets the PT2 admission floor of the charge-sector solves, and '{mode}' runs none. "
             "Remove it, or pick a criterion that solves ('gap', 'peak' or 'occ')."
         )
+    if allow_memory_bound and mode in STATIC_SCHEMES:
+        raise ValueError(f"'allow_memory_bound' applies to the charge-sector solves, and '{mode}' runs none.")
     if e_pt2_tol is not None and mode not in {"gap", "peak"}:
         raise ValueError(
             "'e_pt2' on the double-counting line sets the convergence of the 'gap' and 'peak' charge-sector solves; "
@@ -104,4 +117,4 @@ def parse_dc_line(dc_line):
                 else f"the static scheme '{mode}' runs no solve."
             )
         )
-    return DCRequest(mode, target, 0.5 if alpha is None else alpha, de2_min, e_pt2_tol)
+    return DCRequest(mode, target, 0.5 if alpha is None else alpha, de2_min, e_pt2_tol, allow_memory_bound)

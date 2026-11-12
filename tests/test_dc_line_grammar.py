@@ -204,3 +204,16 @@ def test_e_pt2_fits_rspts_100_character_line():
     line = "gap 0.5 alpha 0.15 de2_min 1e-6 e_pt2 1e-5"
     assert len(line) <= 100
     assert _parse_dc_line(line.ljust(100))[4] == 1e-5
+
+
+@pytest.mark.parametrize("line", ["gap 0.5", "2.5", "occ 8"])
+def test_allow_memory_bound_is_a_bare_flag(line):
+    assert parse_dc_line(line).allow_memory_bound is False
+    request = parse_dc_line(f"{line} allow_memory_bound")
+    assert request.allow_memory_bound is True
+    assert (request.mode, request.target) == (parse_dc_line(line).mode, parse_dc_line(line).target)
+
+
+def test_allow_memory_bound_is_refused_where_no_solve_runs():
+    with pytest.raises(ValueError, match="allow_memory_bound"):
+        parse_dc_line("fll allow_memory_bound")
