@@ -7,7 +7,7 @@ restructured.  What each criterion means, and why the modifiers exist, is in ``d
 from dataclasses import dataclass
 from typing import Optional
 
-STATIC_SCHEMES = frozenset({"fll", "amf", "sigma_inf", "sigmainf", "nominal"})
+STATIC_SCHEMES = frozenset({"amf", "sigma_inf", "sigmainf", "nominal"})
 
 
 @dataclass(frozen=True)
@@ -90,6 +90,8 @@ def parse_dc_line(dc_line):
                 f"the target occupation. Got: {words}"
             )
         mode, target = "occupation", (float(words[1]) if len(words) == 2 else None)
+    elif head in {"fll"}:
+        mode, target = "fll", (float(words[1]) if len(words) == 2 else None)
     elif head in STATIC_SCHEMES:
         if len(words) != 1:
             raise ValueError(f"impurityModel static double counting ({head}) takes no further arguments. Got: {words}")
@@ -98,7 +100,7 @@ def parse_dc_line(dc_line):
         if len(words) != 1:
             raise ValueError(
                 "impurityModel double counting takes 1 argument, peak_position, 'gap [offset]', "
-                f"'occ [target impurity occupation]', or one of fll/amf/sigma_inf/nominal. Got: {words}"
+                f"'occ [target impurity occupation]', 'fll [impurity Occupation]', or one of amf/sigma_inf/nominal. Got: {words}"
             )
         mode, target = "peak", float(words[0])
     if de2_min is not None and mode in STATIC_SCHEMES:

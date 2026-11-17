@@ -74,7 +74,7 @@ def _criterion(request, model, basis, solver, *, w, tau, nominal_total, comm, ve
             **solves,
         )
     if request.mode == "fll":
-        return fll_dc(model, tau=tau), None
+        return fll_dc(model, tau=tau, n=request.target), None
     if request.mode == "amf":
         return amf_dc(model, tau=tau), None
     if request.mode in ("sigma_inf", "sigmainf"):
