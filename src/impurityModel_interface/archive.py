@@ -136,11 +136,12 @@ def store_bath_fit(filename, label, fingerprint, block_structure, fit):
         fit_g.attrs["hyb fingerprint"] = fingerprint
         fit_g.attrs["block structure"] = repr(block_structure)
         if fit.warm_start_info is not None:
-            # Audit trail, one entry per inequivalent block: whether the previous bath was kept or
-            # a better global fit replaced it ("cold" when there was nothing to start from), and the
-            # two costs the decision compared (NaN when not computed).
+            # Audit trail, one entry per inequivalent block: whether the previous energies were held,
+            # refined in place or replaced by the global fit ("cold" when there was nothing to start
+            # from), and the costs the decision compared (NaN when not computed; "cost warm" is the
+            # cost of a frozen fit).
             fit_g.attrs["warm start"] = [info["status"] for info in fit.warm_start_info]
-            for key in ("cost warm", "cost global"):
+            for key in ("cost held", "cost refined", "cost warm", "cost global"):
                 fit_g.attrs[key] = np.array([info.get(key, np.nan) for info in fit.warm_start_info], dtype=float)
         for key, values in (("vs_star", fit.vs_star), ("ebs_star", fit.ebs_star), ("shifts", fit.shifts)):
             group = fit_g.require_group(key)

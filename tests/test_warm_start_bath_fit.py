@@ -51,7 +51,7 @@ def _fit(path, s, **options):
 def _fit_group(path, it):
     with h5.File(path, "r") as f:
         g = f[f"{LABEL} {it}/Bath fit"]
-        return {key: g.attrs[key] for key in ("warm start", "cost warm", "cost global")}, int(f.attrs["last iteration"])
+        return {key: g.attrs[key] for key in ("warm start", "cost held", "cost refined", "cost warm", "cost global")}, int(f.attrs["last iteration"])
 
 
 def test_first_iteration_is_cold_and_the_next_is_warm(shared_tmp_path):
@@ -60,13 +60,13 @@ def test_first_iteration_is_cold_and_the_next_is_warm(shared_tmp_path):
     audit, last = _fit_group(path, 1)
     assert last == 1
     assert list(audit["warm start"]) == ["cold"]
-    assert np.isnan(audit["cost warm"][0]) and np.isfinite(audit["cost global"][0])
+    assert np.isnan(audit["cost held"][0]) and np.isfinite(audit["cost global"][0])
 
     _fit(path, 1.154)  # a new iteration: new hybridization fingerprint
     audit, last = _fit_group(path, 2)
     assert last == 2
-    assert list(audit["warm start"]) == ["kept"]
-    assert np.isfinite(audit["cost warm"][0])
+    assert list(audit["warm start"]) == ["held"]
+    assert np.isfinite(audit["cost held"][0]) and np.isfinite(audit["cost refined"][0])
 
 
 def test_cold_fit_ignores_the_previous_fit(shared_tmp_path):

@@ -108,7 +108,7 @@ def fit_h0(
     stored_fit = on_root(comm, look_up)
 
     # Seed a new fit with the latest stored bath energies: frozen (hoppings re-solved only) or
-    # warm-started (kept unless a global search beats it by warm_tol).  Gated on the fit being new,
+    # warm-started (held unless a refinement or global search beats it by warm_tol).  Gated on the fit being new,
     # not on a flag only rank 0 knows, so every rank takes the same branch into the collective fit.
     previous_energies = None
     if (options.freeze_bath_energies or options.warm_start) and stored_fit is None:
