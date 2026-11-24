@@ -59,6 +59,11 @@ except ImportError as import_error:
         "<path-to-impurityModel>`."
     ) from import_error
 
+#: Version of ``run_impmod_ed``'s argument list; RSPt passes its own value as the last argument
+#: (``impmod_abi_version`` in ``green_impmod_interface.F90``) and any other value is refused.
+#: 2 added the one-body operators, the dipole and the point-group representations.
+ABI_VERSION = 2
+
 #: The versions of the two upstream interfaces this wrapper is written against.
 EXPECTED_SOLVER_API = 1
 EXPECTED_FIT_API = 1
@@ -103,6 +108,17 @@ def _run_impmod_ed(
     verbosity,
     size_real,
     size_complex,
+    rspt_ms,
+    rspt_msp,
+    rspt_ml,
+    rspt_mlp,
+    rspt_msaxis,
+    rspt_dxyz,
+    has_dxyz,
+    rspt_symm_rep,
+    rspt_symm_timerev,
+    n_symm,
+    abi_version,
 ):
     """Wrap RSPt's raw pointers as numpy views and hand them to :func:`solve.solve`.
 
@@ -122,11 +138,43 @@ def _run_impmod_ed(
 
     ``n_iw``, ``n_w``, ``size_real`` and ``size_complex`` exist only to compute the byte
     counts below, and are deliberately not forwarded.
+
+    The trailing arguments (ABI version 2) are RSPt's one-body operators ``ms, msp, ml, mlp, msaxis``,
+    the dipole ``dxyz`` (meaningful only when ``has_dxyz``), the point-group representations
+    ``symm_rep``/``symm_timerev`` and ``abi_version``. They are copied, not aliased: they are inputs
+    only. An all-zero operator is what RSPt sends when it did not allocate one, and counts as absent.
     """
+    if abi_version != ABI_VERSION:
+        raise RuntimeError(
+            f"RSPt called run_impmod_ed with ABI version {abi_version!r}, this interface implements "
+            f"{ABI_VERSION}. Rebuild RSPt (green_impmod_interface.F90) and this library together."
+        )
 
     def view(pointer, shape, dtype=complex, itemsize=size_complex):
         count = int(np.prod(shape))
         return np.ndarray(buffer=ffi.buffer(pointer, count * itemsize), shape=shape, order="F", dtype=dtype)
+
+    def operator(pointer, shape):
+        if pointer is None:
+            return None
+        value = view(pointer, shape).copy(order="F")
+        return value if np.any(value) else None
+
+    operator_arrays = {
+        name: operator(pointer, (n_orb, n_orb))
+        for name, pointer in (
+            ("ms", rspt_ms),
+            ("msp", rspt_msp),
+            ("ml", rspt_ml),
+            ("mlp", rspt_mlp),
+            ("msaxis", rspt_msaxis),
+        )
+    }
+    if has_dxyz:
+        operator_arrays["dxyz"] = view(rspt_dxyz, (n_orb, n_orb, 3)).copy(order="F")
+    if n_symm:
+        operator_arrays["symm_rep"] = view(rspt_symm_rep, (n_orb, n_orb, n_symm)).copy(order="F")
+        operator_arrays["symm_timerev"] = view(rspt_symm_timerev, (n_symm,), np.intc, np.dtype(np.intc).itemsize).copy()
 
     return solve(
         label=ffi.string(rspt_label, 18).decode("ascii"),
@@ -149,6 +197,7 @@ def _run_impmod_ed(
         eim=eim,
         tau=tau,
         verbosity=verbosity,
+        operator_arrays=operator_arrays,
     )
 
 

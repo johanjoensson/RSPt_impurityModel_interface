@@ -23,7 +23,7 @@ from mpi4py import MPI  # noqa: F401,E402
 
 from impurityModel_interface import entry  # noqa: E402
 
-N_ORB, N_IW, N_W = 4, 6, 8
+N_ORB, N_IW, N_W, N_SYMM = 4, 6, 8, 2
 SIZE_REAL, SIZE_COMPLEX = 8, 16
 
 # name -> element count, in the shape RSPt allocates it with.
@@ -37,9 +37,17 @@ COMPLEX_ARRAYS = {
     "sig_dc": N_ORB * N_ORB,
     "corr_to_spherical": N_ORB * N_ORB,
     "corr_to_cf": N_ORB * N_ORB,
+    "ms": N_ORB * N_ORB,
+    "msp": N_ORB * N_ORB,
+    "ml": N_ORB * N_ORB,
+    "mlp": N_ORB * N_ORB,
+    "msaxis": N_ORB * N_ORB,
+    "dxyz": N_ORB * N_ORB * 3,
+    "symm_rep": N_ORB * N_ORB * N_SYMM,
 }
 REAL_ARRAYS = {"iw": N_IW, "w": N_W}
 
+OPERATORS = ("ms", "msp", "ml", "mlp", "msaxis", "dxyz", "symm_rep")
 OUTPUTS = ("sig", "sig_real", "sig_static", "sig_dc")
 INPUTS = ("h_dft", "u4", "hyb")
 
@@ -56,6 +64,7 @@ def rspt_memory(monkeypatch):
     for name, count in REAL_ARRAYS.items():
         mem[name] = ffi.new("char[]", count * SIZE_REAL)
     # Fortran character fields: fixed width, space padded, no NUL terminator.
+    mem["symm_timerev"] = ffi.new("int[]", [0, 1])
     mem["label"] = ffi.new("char[18]", b"Ni-3d" + b" " * 13)
     mem["solver"] = ffi.new("char[100]", b"8 10" + b" " * 96)
     mem["dc"] = ffi.new("char[100]", b"gap 0.5" + b" " * 93)
@@ -68,7 +77,7 @@ def _raw(mem, name):
     return np.frombuffer(mem["_ffi"].buffer(mem[name], count * SIZE_COMPLEX), dtype=complex)
 
 
-def _invoke(mem, monkeypatch, recorder):
+def _invoke(mem, monkeypatch, recorder, has_dxyz=1, n_symm=N_SYMM, abi_version=entry.ABI_VERSION):
     monkeypatch.setattr(entry, "solve", recorder)
     return entry._run_impmod_ed(
         mem["label"],
@@ -96,6 +105,17 @@ def _invoke(mem, monkeypatch, recorder):
         0,
         SIZE_REAL,
         SIZE_COMPLEX,
+        mem["ms"],
+        mem["msp"],
+        mem["ml"],
+        mem["mlp"],
+        mem["msaxis"],
+        mem["dxyz"],
+        has_dxyz,
+        mem["symm_rep"],
+        mem["symm_timerev"],
+        n_symm,
+        abi_version,
     )
 
 
@@ -134,7 +154,7 @@ def test_the_views_are_writable_fortran_ordered_and_own_nothing(rspt_memory, mon
 
     _invoke(rspt_memory, monkeypatch, recorder)
     for name in COMPLEX_ARRAYS:
-        if name == "corr_to_cf":
+        if name == "corr_to_cf" or name in OPERATORS:
             continue  # accepted for RSPt's signature, deliberately not handed on
         arr = seen[name if name != "corr_to_spherical" else f"{name}_in"]
         assert arr.dtype == complex, name
@@ -194,3 +214,50 @@ def test_corr_to_cf_is_accepted_but_not_handed_on(rspt_memory, monkeypatch):
     _invoke(rspt_memory, monkeypatch, recorder)
     assert not any("corr_to_cf" in key for key in seen)
     assert all(np.all(np.isfinite(v)) for v in seen.values() if isinstance(v, np.ndarray) and v.dtype == complex)
+
+
+def _fill(mem, name, values):
+    """Write ``values`` into RSPt's allocation in Fortran (column-major) order."""
+    flat = np.asarray(values, dtype=complex).reshape(-1, order="F")
+    np.frombuffer(mem["_ffi"].buffer(mem[name], flat.size * SIZE_COMPLEX), dtype=complex)[...] = flat
+
+
+def test_the_operators_arrive_in_fortran_layout_and_are_copies(rspt_memory, monkeypatch):
+    """msp(2, 1) = 1 in Fortran is S_+ |1> = |2>: element [1, 0], not its transpose."""
+    msp = np.zeros((N_ORB, N_ORB))
+    msp[1, 0] = 1
+    dxyz = np.arange(N_ORB * N_ORB * 3).reshape(N_ORB, N_ORB, 3) + 1j
+    rep = np.stack([np.eye(N_ORB), np.eye(N_ORB)[::-1]], axis=-1)
+    _fill(rspt_memory, "msp", msp)
+    _fill(rspt_memory, "dxyz", dxyz)
+    _fill(rspt_memory, "symm_rep", rep)
+    seen = {}
+
+    def recorder(**kw):
+        seen.update(kw["operator_arrays"])
+        return 0
+
+    _invoke(rspt_memory, monkeypatch, recorder)
+    np.testing.assert_array_equal(seen["msp"], msp)
+    np.testing.assert_array_equal(seen["dxyz"], dxyz)
+    np.testing.assert_array_equal(seen["symm_rep"], rep)
+    assert list(seen["symm_timerev"]) == [0, 1]
+    assert seen["ms"] is None  # RSPt's zeros mean "not allocated"
+    seen["msp"][...] = 7
+    assert not np.any(_raw(rspt_memory, "msp") == 7)
+
+
+def test_absent_dipole_and_symmetries_are_left_out(rspt_memory, monkeypatch):
+    seen = {}
+
+    def recorder(**kw):
+        seen.update(kw["operator_arrays"])
+        return 0
+
+    _invoke(rspt_memory, monkeypatch, recorder, has_dxyz=0, n_symm=0)
+    assert "dxyz" not in seen and "symm_rep" not in seen
+
+
+def test_a_different_abi_version_is_refused(rspt_memory, monkeypatch):
+    with pytest.raises(RuntimeError, match="ABI version"):
+        _invoke(rspt_memory, monkeypatch, lambda **kw: 0, abi_version=1)

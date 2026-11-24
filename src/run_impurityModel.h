@@ -23,5 +23,10 @@ extern int run_impmod_ed_py(char label[], char solver_param[], char dc_param[],
                          double _Complex *corr_to_cf, size_t n_orb,
                          size_t n_rot_cols, size_t n_orb_full, size_t n_iw,
                          size_t n_w, double eim, double tau, int verbosity,
-                         size_t size_real, size_t size_complex);
+                         size_t size_real, size_t size_complex,
+                         double _Complex *ms, double _Complex *msp,
+                         double _Complex *ml, double _Complex *mlp,
+                         double _Complex *msaxis, double _Complex *dxyz,
+                         int has_dxyz, double _Complex *symm_rep,
+                         int *symm_timerev, size_t n_symm, int abi_version);
 #endif // IMPMOD_INTERFACE_H

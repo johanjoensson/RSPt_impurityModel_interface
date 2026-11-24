@@ -153,7 +153,9 @@ def build_operators(arrays, n_orb):
 
     ``arrays`` maps any of ``ms, msp, ml, mlp, msaxis`` (``(n_orb, n_orb)``: S_z, S_+, L_z, L_+, S along the
     spin axis) and ``dxyz`` (``(n_orb, n_orb, 3)``, RSPt's Fortran layout) to the arrays RSPt holds in
-    ``clustertype%observables``; absent or ``None`` entries are left out.  ``None`` when nothing was passed.
+    ``clustertype%observables``, and ``symm_rep`` (``(n_orb, n_orb, n_symm)``) with ``symm_timerev``
+    (``(n_symm,)``, nonzero = antiunitary) to ``clustertype%symm(:)%rep`` / ``%timerev``; absent or ``None``
+    entries are left out.  The symmetry operations are stored, not verified or used yet.  ``None`` when nothing was passed.
     """
     if not arrays:
         return None
@@ -161,7 +163,7 @@ def build_operators(arrays, n_orb):
     if not present:
         return None
     names = {"ms": "sz", "msp": "s_plus", "ml": "lz", "mlp": "l_plus", "msaxis": "s_axis"}
-    unknown = set(present) - set(names) - {"dxyz"}
+    unknown = set(present) - set(names) - {"dxyz", "symm_rep", "symm_timerev"}
     if unknown:
         raise ValueError(f"unknown operator arrays {sorted(unknown)}")
 
@@ -175,6 +177,18 @@ def build_operators(arrays, n_orb):
     kwargs = {names[k]: shaped(k, v, (n_orb, n_orb)) for k, v in present.items() if k in names}
     if "dxyz" in present:
         kwargs["dipole"] = np.moveaxis(shaped("dxyz", present["dxyz"], (n_orb, n_orb, 3)), -1, 0)
+    if "symm_rep" in present:
+        reps = np.array(present["symm_rep"], dtype=complex)
+        if reps.ndim != 3 or reps.shape[:2] != (n_orb, n_orb):
+            raise ValueError(f"operator array symm_rep has shape {reps.shape}, expected ({n_orb}, {n_orb}, n_symm)")
+        timerev = np.asarray(present.get("symm_timerev", np.zeros(reps.shape[2], dtype=int))).reshape(-1)
+        if timerev.shape != (reps.shape[2],):
+            raise ValueError(f"symm_timerev has {timerev.size} entries for {reps.shape[2]} symmetry operations")
+        kwargs["symmetry_ops"] = tuple((reps[:, :, i].copy(), bool(timerev[i])) for i in range(reps.shape[2]))
+    elif "symm_timerev" in present:
+        raise ValueError("symm_timerev given without symm_rep")
+    if not kwargs:
+        return None
     return LocalOperators(source="rspt", frame="global", **kwargs)
 
 
