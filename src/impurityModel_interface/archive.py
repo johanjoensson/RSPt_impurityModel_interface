@@ -171,12 +171,13 @@ def write_problem(
     corr_to_solver,
     rot_to_spherical,
     layout,
+    operators=None,
 ):
     """Write the solver problem of this iteration into its group.  Rank 0 only.
 
     ``line`` is the parsed :class:`~impurityModel_interface.solver_line.SolverLine` (with the
     temperature on its basis options), ``layout`` the ``(impurity, valence, conduction)`` orbital
-    indices.  Next to the solver's own record this stamps the fit options, the bath size, the
+    indices, ``operators`` the model's :class:`LocalOperators` (solver basis) or ``None``.  Next to the solver's own record this stamps the fit options, the bath size, the
     ``corr_to_solver`` rotation (so the archive is self-contained) and the versions that made it.
     """
     impurity, valence, conduction = layout
@@ -201,6 +202,7 @@ def write_problem(
             h_dft=h_dft,
             h_bath=h_bath,
             v=v,
+            operators=operators,
         )
         group.attrs["n_baths"] = line.n_baths
         for key, value in line.fit.to_attrs().items():

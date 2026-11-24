@@ -25,6 +25,7 @@ from impurityModel.api import (
     discretized_impurity_occupation,
     report_continuum_reference,
     save_Greens_function,
+    site_frames,
 )
 from mpi4py import MPI
 from rspt2spectra.block_structure import project_to_blocks
@@ -193,7 +194,13 @@ def build_operators(arrays, n_orb):
 
 
 def _report_operator_check(operators, rot_to_spherical, comm):
-    """Print how far RSPt's operators are from the spherical rebuild (they agree for a trivial site frame)."""
+    """Print the site frame RSPt's operators define and how well they fit the spherical rebuild.
+
+    RSPt's ``ml``/``mlp`` are along the global (crystal) axes; the spherical rebuild is in the frame
+    ``rot_to_spherical`` defines. A rotated site therefore shows as a rotation with a roundoff residual, not as
+    an error; a large residual means the basis is not what ``rot_to_spherical`` says. The spin operators are
+    compared directly (RSPt keeps spin in the global frame).
+    """
     if comm.rank != 0 or operators is None:
         return
     l = _shell_l(rot_to_spherical)
@@ -202,11 +209,16 @@ def _report_operator_check(operators, rot_to_spherical, comm):
         return
     spherical = LocalOperators.from_spherical(rot_to_spherical, (l,))
     parts = []
-    for name in ("sz", "s_plus", "lz", "l_plus"):
+    for name in ("sz", "s_plus"):
         got, ref = getattr(operators, name), getattr(spherical, name)
         if got is not None and ref is not None and got.shape == ref.shape:
             parts.append(f"{name} {np.max(np.abs(got - ref)):.2e}")
-    print("RSPt operators vs spherical rebuild (max abs deviation): " + ", ".join(parts), flush=True)
+    if parts:
+        print("RSPt spin operators vs spherical rebuild (max abs deviation): " + ", ".join(parts), flush=True)
+    frame = site_frames(operators, rot_to_spherical, (l,))[0]
+    if frame is not None:
+        warn = "" if frame.residual < 1e-6 else "  WARNING: L is not a rotation of the spherical L in this basis"
+        print(f"RSPt site frame: {frame.describe()}{warn}", flush=True)
 
 
 def _shell_l(rot_to_spherical):
@@ -471,6 +483,7 @@ def solve(
                 corr_to_solver=problem.corr_to_solver,
                 rot_to_spherical=context["rot_to_spherical"],
                 layout=(fitted.impurity_indices, fitted.valence_bath_indices, fitted.conduction_bath_indices),
+                operators=problem.model.operators,
             ),
         )
         if verbosity >= 1:
