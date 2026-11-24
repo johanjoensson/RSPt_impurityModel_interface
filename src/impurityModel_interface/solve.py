@@ -19,6 +19,7 @@ import numpy as np
 from impurityModel.api import (
     CapLedger,
     ImpurityModel,
+    LocalOperators,
     Meshes,
     calc_selfenergy,
     discretized_impurity_occupation,
@@ -147,7 +148,48 @@ class Problem:
     cap_ledger: CapLedger
 
 
-def prepare_problem(*, label, line, dc_flag, h_dft, u4, hyb, w, corr_to_spherical, sig_dc, eim, tau, comm, verbosity):
+def build_operators(arrays, n_orb):
+    """RSPt's one-body operator matrices as a :class:`LocalOperators` in RSPt's correlated basis.
+
+    ``arrays`` maps any of ``ms, msp, ml, mlp, msaxis`` (``(n_orb, n_orb)``: S_z, S_+, L_z, L_+, S along the
+    spin axis) and ``dxyz`` (``(n_orb, n_orb, 3)``, RSPt's Fortran layout) to the arrays RSPt holds in
+    ``clustertype%observables``; absent or ``None`` entries are left out.  ``None`` when nothing was passed.
+    """
+    if not arrays:
+        return None
+    present = {k: v for k, v in arrays.items() if v is not None}
+    if not present:
+        return None
+    names = {"ms": "sz", "msp": "s_plus", "ml": "lz", "mlp": "l_plus", "msaxis": "s_axis"}
+    unknown = set(present) - set(names) - {"dxyz"}
+    if unknown:
+        raise ValueError(f"unknown operator arrays {sorted(unknown)}")
+    kwargs = {names[k]: np.array(v, dtype=complex).reshape(n_orb, n_orb) for k, v in present.items() if k in names}
+    if "dxyz" in present:
+        kwargs["dipole"] = np.moveaxis(np.array(present["dxyz"], dtype=complex).reshape(n_orb, n_orb, 3), -1, 0)
+    return LocalOperators(source="rspt", frame="global", **kwargs)
+
+
+def _report_operator_check(operators, rot_to_spherical, comm):
+    """Print how far RSPt's operators are from the spherical rebuild (they agree for a trivial site frame)."""
+    if comm.rank != 0 or operators is None:
+        return
+    spherical = LocalOperators.from_spherical(rot_to_spherical, (_shell_l(rot_to_spherical),))
+    parts = []
+    for name in ("sz", "s_plus", "lz", "l_plus"):
+        got, ref = getattr(operators, name), getattr(spherical, name)
+        if got is not None and ref is not None and got.shape == ref.shape:
+            parts.append(f"{name} {np.max(np.abs(got - ref)):.2e}")
+    print("RSPt operators vs spherical rebuild (max abs deviation): " + ", ".join(parts), flush=True)
+
+
+def _shell_l(rot_to_spherical):
+    return (rot_to_spherical.shape[1] // 2 - 1) // 2
+
+
+def prepare_problem(
+    *, label, line, dc_flag, h_dft, u4, hyb, w, corr_to_spherical, sig_dc, eim, tau, comm, verbosity, operators=None
+):
     """Fit h0 and build the solver model.  ``h_dft``, ``u4``, ``hyb``, ``sig_dc`` are in RSPt's correlated basis.
 
     Prints the settings header, fits the bath (or reuses this iteration's fit), rotates everything
@@ -254,6 +296,8 @@ def prepare_problem(*, label, line, dc_flag, h_dft, u4, hyb, w, corr_to_spherica
     # passes h_dft WITHOUT the double counting subtracted) and model.dc is RSPt's current dc:
     # calc_selfenergy subtracts it and the fixed_*_dc searches use it as their guess.
     rot_to_spherical = np.conj(rotation.T) @ corr_to_spherical
+    if operators is not None and verbosity >= 1:
+        _report_operator_check(operators, corr_to_spherical, comm)
     model = ImpurityModel.from_blocks(
         H_imp,
         v,
@@ -262,6 +306,7 @@ def prepare_problem(*, label, line, dc_flag, h_dft, u4, hyb, w, corr_to_spherica
         dc=sig_dc_fit,
         rot_to_spherical=rot_to_spherical,
         bath_valence_conduction=(fitted.valence_bath_indices, fitted.conduction_bath_indices),
+        operators=None if operators is None else operators.rotated(rotation),
     )
     return (
         Problem(model, basis, solver, blocks, corr_to_solver, sig_dc_fit, cap_ledger),
@@ -317,11 +362,14 @@ def solve(
     eim,
     tau,
     verbosity,
+    operator_arrays=None,
 ):
     """Run the double-counting or self-energy solve on already-marshalled arrays.
 
     Pure Python: ``label``/``solver_line``/``dc_line`` are ``str`` and every array is a numpy
-    array.  The arrays are the caller's and are mutated in place.  Returns 0, or -1 if the
+    array.  ``operator_arrays`` optionally carries RSPt's observables (see :func:`build_operators`); they
+    are rotated into the fitting basis with the model and drive the spin pairing.  The arrays are the caller's
+    and are mutated in place.  Returns 0, or -1 if the
     self-energy solve failed (after adding infinity to ``sig`` and aborting the communicator).
     """
     comm = MPI.COMM_WORLD
@@ -332,6 +380,9 @@ def solve(
     comm.Bcast(u4)
     comm.Bcast(sig_dc)
     comm.Bcast(hyb)
+    operators = build_operators(operator_arrays, n_orb)
+    if operators is not None:
+        operators = comm.bcast(operators)
 
     # For python, it makes more sense to put the frequency index first, instead of last
     sig_python = np.moveaxis(sig, -1, 0)
@@ -361,6 +412,7 @@ def solve(
             tau=tau,
             comm=comm,
             verbosity=verbosity,
+            operators=operators,
         )
         fitted = context["fitted"]
         on_root(
