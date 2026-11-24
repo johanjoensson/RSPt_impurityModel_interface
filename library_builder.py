@@ -21,22 +21,7 @@ ffibuilder.set_source(
     #include <stdio.h>
     #include "run_impurityModel.h"
 
-CFFI_DLLEXPORT int run_impmod_ed(char label[], char solver_param[], char dc_param[],
-                                 int dc_flag, double _Complex *U_mat,
-                                 double _Complex *hyb, double _Complex *h_dft,
-                                 double _Complex *sig, double _Complex *sig_real,
-                                 double _Complex *sig_static, double _Complex *sig_dc,
-                                 double *iw, double *w,
-                                 double _Complex *corr_to_spherical,
-                                 double _Complex *corr_to_cf, size_t n_orb,
-                                 size_t n_rot_cols, size_t n_orb_full, size_t n_iw,
-                                 size_t n_w, double eim, double tau, int verbosity,
-                                 size_t size_real, size_t size_complex,
-                                 double _Complex *ms, double _Complex *msp,
-                                 double _Complex *ml, double _Complex *mlp,
-                                 double _Complex *msaxis, double _Complex *dxyz,
-                                 int has_dxyz, double _Complex *symm_rep,
-                                 int *symm_timerev, size_t n_symm, int abi_version)
+CFFI_DLLEXPORT int run_impmod_cluster(const impmod_field *fields, size_t n_fields, int abi_version)
 {
     if (cffi_start_python() != 0) {
         fprintf(stderr,
@@ -45,11 +30,7 @@ CFFI_DLLEXPORT int run_impmod_ed(char label[], char solver_param[], char dc_para
         fflush(stderr);
         return -99;
     }
-    return run_impmod_ed_py(label, solver_param, dc_param, dc_flag, U_mat, hyb, h_dft,
-                            sig, sig_real, sig_static, sig_dc, iw, w, corr_to_spherical,
-                            corr_to_cf, n_orb, n_rot_cols, n_orb_full, n_iw, n_w, eim,
-                            tau, verbosity, size_real, size_complex, ms, msp, ml, mlp, msaxis,
-                            dxyz, has_dxyz, symm_rep, symm_timerev, n_symm, abi_version);
+    return run_impmod_cluster_py(fields, n_fields, abi_version);
 }
 """,
 )

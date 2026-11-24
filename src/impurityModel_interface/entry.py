@@ -1,6 +1,6 @@
 """The door RSPt knocks on: the cffi callback, the raw pointers and the process environment.
 
-Nothing here knows any physics.  :func:`run_impmod_ed` is what RSPt calls; it wraps the solve in
+Nothing here knows any physics.  :func:`run_impmod_cluster` is what RSPt calls; it wraps the solve in
 whatever ``[environment]`` asks for and turns every failure into the ``-1`` RSPt reads as one.
 :func:`_run_impmod_ed` turns RSPt's pointers into numpy views and calls :func:`solve.solve`.
 """
@@ -59,11 +59,6 @@ except ImportError as import_error:
         "<path-to-impurityModel>`."
     ) from import_error
 
-#: Version of ``run_impmod_ed``'s argument list; RSPt passes its own value as the last argument
-#: (``impmod_abi_version`` in ``green_impmod_interface.F90``) and any other value is refused.
-#: 2 added the one-body operators, the dipole and the point-group representations.
-ABI_VERSION = 2
-
 #: The versions of the two upstream interfaces this wrapper is written against.
 EXPECTED_SOLVER_API = 1
 EXPECTED_FIT_API = 1
@@ -79,48 +74,15 @@ for _name, _module, _expected in (
 
 from impurityModel.api import apply_environment, find_environment_file, load_environment  # noqa: E402
 
+# Version of the ``impmod_field`` record layout; RSPt passes its own value as the last argument
+# (``impmod_abi_version`` in ``green_impmod_interface.F90``) and any other value is refused.
+# 3 replaced the positional argument list by a table of named fields (see ``rspt_fields``).
+from .rspt_fields import ABI_VERSION, FIELD_SIZE, RsptFields, solve_arguments  # noqa: E402
 from .solve import solve  # noqa: E402
 
 
-def _run_impmod_ed(
-    rspt_label,
-    rspt_solver_line,
-    rspt_dc_line,
-    rspt_dc_flag,
-    rspt_u4,
-    rspt_hyb,
-    rspt_h_dft,
-    rspt_sig,
-    rspt_sig_real,
-    rspt_sig_static,
-    rspt_sig_dc,
-    rspt_iw,
-    rspt_w,
-    rspt_corr_to_spherical,
-    rspt_corr_to_cf,
-    n_orb,
-    n_rot_cols,
-    n_orb_full,
-    n_iw,
-    n_w,
-    eim,
-    tau,
-    verbosity,
-    size_real,
-    size_complex,
-    rspt_ms,
-    rspt_msp,
-    rspt_ml,
-    rspt_mlp,
-    rspt_msaxis,
-    rspt_dxyz,
-    has_dxyz,
-    rspt_symm_rep,
-    rspt_symm_timerev,
-    n_symm,
-    abi_version,
-):
-    """Wrap RSPt's raw pointers as numpy views and hand them to :func:`solve.solve`.
+def _run_impmod_ed(rspt_fields, n_fields, abi_version):
+    """Wrap RSPt's field table as numpy views and hand the derived arguments to :func:`solve.solve`.
 
     The only function that touches a cffi handle. Everything the physics needs -- decoded
     strings and aliased numpy arrays -- is produced here, so ``solve`` is plain Python and can be
@@ -129,76 +91,24 @@ def _run_impmod_ed(
     The views alias RSPt's memory; they are never copies. The four outputs (``sig``,
     ``sig_real``, ``sig_static``, ``sig_dc``) are written back by in-place assignment, and
     the inputs matter just as much -- the ``comm.Bcast`` calls in ``solve`` write
-    *through* ``h_dft``, ``u4`` and ``hyb`` into RSPt's own memory on non-root ranks. An
+    *through* ``u4`` and ``hyb`` into RSPt's own memory on non-root ranks. An
     ``np.asarray(..., dtype=complex)`` anywhere below would silently break both, and no
-    single-rank test would notice.
+    single-rank test would notice. ``h_dft`` and the operators are copies: they are derived from
+    RSPt's cluster and RSPt never reads them back.
 
-    ``rspt_corr_to_cf`` is part of RSPt's signature but is deliberately not read: the fitting
-    basis is chosen from the data in RSPt's correlated basis.
-
-    ``n_iw``, ``n_w``, ``size_real`` and ``size_complex`` exist only to compute the byte
-    counts below, and are deliberately not forwarded.
-
-    The trailing arguments (ABI version 2) are RSPt's one-body operators ``ms, msp, ml, mlp, msaxis``,
-    the dipole ``dxyz`` (meaningful only when ``has_dxyz``), the point-group representations
-    ``symm_rep``/``symm_timerev`` and ``abi_version``. They are copied, not aliased: they are inputs
-    only. An all-zero operator is what RSPt sends when it did not allocate one, and counts as absent.
+    The table is valid only for the duration of this call; nothing may keep a reference to it.
     """
     if abi_version != ABI_VERSION:
         raise RuntimeError(
-            f"RSPt called run_impmod_ed with ABI version {abi_version!r}, this interface implements "
+            f"RSPt called run_impmod_cluster with ABI version {abi_version!r}, this interface implements "
             f"{ABI_VERSION}. Rebuild RSPt (green_impmod_interface.F90) and this library together."
         )
-
-    def view(pointer, shape, dtype=complex, itemsize=size_complex):
-        count = int(np.prod(shape))
-        return np.ndarray(buffer=ffi.buffer(pointer, count * itemsize), shape=shape, order="F", dtype=dtype)
-
-    def operator(pointer, shape):
-        if pointer is None:
-            return None
-        value = view(pointer, shape).copy(order="F")
-        return value if np.any(value) else None
-
-    operator_arrays = {
-        name: operator(pointer, (n_orb, n_orb))
-        for name, pointer in (
-            ("ms", rspt_ms),
-            ("msp", rspt_msp),
-            ("ml", rspt_ml),
-            ("mlp", rspt_mlp),
-            ("msaxis", rspt_msaxis),
+    if ffi.sizeof("impmod_field") != FIELD_SIZE:
+        raise RuntimeError(
+            f"impmod_field is {ffi.sizeof('impmod_field')} bytes in this library, RSPt builds {FIELD_SIZE}-byte records."
         )
-    }
-    if has_dxyz:
-        operator_arrays["dxyz"] = view(rspt_dxyz, (n_orb, n_orb, 3)).copy(order="F")
-    if n_symm:
-        operator_arrays["symm_rep"] = view(rspt_symm_rep, (n_orb, n_orb, n_symm)).copy(order="F")
-        operator_arrays["symm_timerev"] = view(rspt_symm_timerev, (n_symm,), np.intc, np.dtype(np.intc).itemsize).copy()
-
-    return solve(
-        label=ffi.string(rspt_label, 18).decode("ascii"),
-        solver_line=ffi.string(rspt_solver_line, 100).decode("ascii"),
-        dc_line=ffi.string(rspt_dc_line, 100).decode("ascii"),
-        dc_flag=rspt_dc_flag,
-        h_dft=view(rspt_h_dft, (n_orb, n_orb)),
-        u4=view(rspt_u4, (n_orb,) * 4),
-        hyb=view(rspt_hyb, (n_orb, n_orb, n_w)),
-        iw=view(rspt_iw, (n_iw,), float, size_real),
-        w=view(rspt_w, (n_w,), float, size_real),
-        sig=view(rspt_sig, (n_orb, n_orb, n_iw)),
-        sig_real=view(rspt_sig_real, (n_orb, n_orb, n_w)),
-        sig_static=view(rspt_sig_static, (n_orb, n_orb)),
-        sig_dc=view(rspt_sig_dc, (n_orb, n_orb)),
-        corr_to_spherical_in=view(rspt_corr_to_spherical, (n_orb, n_orb_full)),
-        n_orb=n_orb,
-        n_rot_cols=n_rot_cols,
-        n_orb_full=n_orb_full,
-        eim=eim,
-        tau=tau,
-        verbosity=verbosity,
-        operator_arrays=operator_arrays,
-    )
+    fields = RsptFields(ffi, rspt_fields, n_fields)
+    return solve(**solve_arguments(fields))
 
 
 # ``error=-1`` is load bearing. cffi's default for an uncaught exception in a callback is to
@@ -208,7 +118,7 @@ def _run_impmod_ed(
 # normally fires; this is the backstop for anything that escapes it, including a failure
 # inside the handler itself.
 def bind_rspt_callback():
-    """Attach :func:`run_impmod_ed` to the extern "Python" slot, if import time could not.
+    """Attach :func:`run_impmod_cluster` to the extern "Python" slot, if import time could not.
 
     Normally the decorator below does this: RSPt's first call starts the interpreter, cffi
     registers the ``run_impurityModel`` module, and only then does ``embedding_init_code``
@@ -236,11 +146,11 @@ def bind_rspt_callback():
     if ffi is embedded_ffi:
         return
     ffi = embedded_ffi
-    embedded_ffi.def_extern("run_impmod_ed_py", error=-1)(run_impmod_ed)
+    embedded_ffi.def_extern("run_impmod_cluster_py", error=-1)(run_impmod_cluster)
 
 
-@ffi.def_extern("run_impmod_ed_py", error=-1)
-def run_impmod_ed(*args):
+@ffi.def_extern("run_impmod_cluster_py", error=-1)
+def run_impmod_cluster(*args):
     """Entry point RSPt calls, wrapping the solve in whatever ``[environment]`` asks for.
 
     RSPt configures the solver through two fixed-width strings and a label, and this callback

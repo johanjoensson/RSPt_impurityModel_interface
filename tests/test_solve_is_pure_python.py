@@ -28,7 +28,7 @@ N_W = 8
 def restore_stdout():
     """``solve`` redirects sys.stdout and only restores it on the paths it completes.
 
-    In production ``entry.run_impmod_ed`` is the net for the rest (see
+    In production ``entry.run_impmod_cluster`` is the net for the rest (see
     ``test_entry_point_returns_failure``). A test calling ``solve`` directly is its own net.
     """
     saved = sys.stdout

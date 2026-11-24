@@ -22,7 +22,8 @@ come from `rspt2spectra.parse_fit_tokens`, the solver options from
 ## Layout
 | Module | Job |
 |---|---|
-| `entry.py` | what RSPt calls: CFFI stub and callback, pointers to numpy views, `[environment]` file |
+| `entry.py` | what RSPt calls (`run_impmod_cluster`): CFFI stub and callback, `[environment]` file |
+| `rspt_fields.py` | RSPt's cluster as a `name -> numpy view` mapping; `solve_arguments` derives `h_dft`, the rotation, the dipole and the symmetry stack from it |
 | `solve.py` | one DMFT step: `prepare_problem`, `run_double_counting`, `run_selfenergy` |
 | `h0_fit.py` | Δ(ω) to h0 through rspt2spectra, with bath-fit reuse and warm start |
 | `solver_line.py`, `dc_line.py` | the two line grammars RSPt passes |
@@ -31,6 +32,18 @@ come from `rspt2spectra.parse_fit_tokens`, the solver options from
 | `mpi.py` | decide on rank 0, broadcast, re-raise everywhere |
 
 The rationale for the double-counting criteria is in `doc/double_counting.md`.
+
+## The RSPt boundary (ABI 3)
+RSPt does not pass its arrays one by one. `green_impmod_interface.F90` builds a table of
+`impmod_field` records (name, pointer, kind, rank, item size, shape; declared in
+`src/run_impurityModel.h`, 128 bytes) with one record per component of its `clustertype`, under
+its Fortran name (`ham`, `harm2corr`, `observables%ms`, `symm(3)%rep`, ...), plus the call
+context under `ctx%` (`ctx%u4`, `ctx%hyb`, `ctx%green_mu`, `ctx%wmsl`, `ctx%emesh`, ...), and calls
+`run_impmod_cluster(fields, n_fields, abi_version)`. Nothing is copied; the views are valid only
+during the call. To read another field of the cluster, register it in the Fortran and look it up
+by name in Python -- the signature never changes again, and `abi_version` only versions the record
+layout. Fields RSPt did not allocate are absent. Only `sig`, `sig_real`, `sig_static`, `sig_dc`,
+`ctx%u4` and `ctx%hyb` are writable views.
 
 ## Tests
 `OMP_NUM_THREADS=1 pytest` from the repository root (`pyproject.toml` puts `src` on the

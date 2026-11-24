@@ -440,9 +440,9 @@ def solve(
     with redirected_stdout(label, dc_flag, comm, verbosity):
         verbosity = comm.bcast(verbosity)
         line = parse_solver_line(solver_line)
-        if rank == 0 and len(solver_line.strip()) >= 100 and not re.search(r"[!#]", solver_line):
+        if rank == 0 and len(solver_line.strip()) >= 120 and not re.search(r"[!#]", solver_line):
             print(
-                "WARNING: the solver line fills all 100 characters RSPt passes; the last option may have been cut off.",
+                "WARNING: the solver line fills all 120 characters of RSPt's solver string; the last option may have been cut off.",
                 flush=True,
             )
         request = parse_dc_line(dc_line) if dc_flag == 1 else None

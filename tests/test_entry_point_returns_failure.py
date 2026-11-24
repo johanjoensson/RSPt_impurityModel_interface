@@ -7,7 +7,7 @@ previous iteration's ``acluster%sig`` still in place -- a wrong answer that look
 converging run.
 
 That was the behaviour until the ``error=-1`` on the ``def_extern`` and the handler in
-``run_impmod_ed``: cffi's default for an uncaught exception in a callback is to report it as
+``run_impmod_cluster``: cffi's default for an uncaught exception in a callback is to report it as
 unraisable and return **0**, and most of the solve ran outside any ``try``. These tests pin
 the return value, which is the part RSPt actually reads.
 """
@@ -25,7 +25,7 @@ from impurityModel_interface import entry
 def _call(monkeypatch, impl):
     """Invoke the entry point with the marshalling half replaced."""
     monkeypatch.setattr(entry, "_run_impmod_ed", impl)
-    return entry.run_impmod_ed()
+    return entry.run_impmod_cluster()
 
 
 def test_success_is_forwarded_unchanged(monkeypatch):
@@ -138,9 +138,9 @@ def test_bind_rspt_callback_registers_with_the_error_backstop(monkeypatch):
     assert entry.ffi is fake, "ffi.string/ffi.buffer would still resolve to the stub"
     assert len(fake.registrations) == 1
     name, error, func = fake.registrations[0]
-    assert name == "run_impmod_ed_py"
+    assert name == "run_impmod_cluster_py"
     assert error == -1, "without this the re-registered callback returns 0 on an exception"
-    assert func is entry.run_impmod_ed
+    assert func is entry.run_impmod_cluster
 
 
 def test_bind_rspt_callback_is_a_no_op_on_the_normal_path(monkeypatch):
