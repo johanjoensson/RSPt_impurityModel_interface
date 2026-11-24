@@ -8,8 +8,14 @@ import numpy as np
 import pytest
 
 pytest.importorskip("mpi4py")
-from test_symm_prec_solve_wiring import _hermitian, _install_spies, _problem, _solve, restore_stdout  # noqa: E402,F401
-
+from test_symm_prec_solve_wiring import (  # noqa: E402,F401
+    _hermitian,
+    _install_spies,
+    _problem,
+    _solve,
+    _unitary,
+    restore_stdout,
+)  
 from impurityModel_interface import solve  # noqa: E402
 
 
@@ -30,36 +36,35 @@ def test_build_operators_maps_names_and_dipole_layout():
 
 
 def test_the_model_gets_the_operators_in_the_fitting_basis(shared_tmp_path, monkeypatch):
+    """The model's operators are ``R^dagger O R`` with ``R`` the fit rotation -- not ``R O R^dagger``.
+
+    The rotation is read back from the model's own ``rot_to_spherical`` (``corr_to_spherical`` is the
+    identity in the helper), and is made non-trivial so that the two directions differ.
+    """
     captured = []
     real = solve.ImpurityModel.from_blocks.__func__
 
     def from_blocks(cls, H_imp, V, H_bath, **kwargs):
-        captured.append(kwargs.get("operators"))
+        captured.append((kwargs.get("operators"), kwargs["rot_to_spherical"]))
         return real(cls, H_imp, V, H_bath, **kwargs)
 
     _install_spies(monkeypatch, sigma_static_cf=_hermitian(1))
     monkeypatch.setattr(solve.ImpurityModel, "from_blocks", classmethod(from_blocks))
-    ms = np.asfortranarray(_hermitian(5))
-    import impurityModel_interface.solve as s
-
-    original = s.solve
-
-    problem = _problem(0.0)
-    arrays_holder = {}
-
-    def spy_prepare(**kw):
-        arrays_holder["operators"] = kw["operators"]
-        return real_prepare(**kw)
-
-    real_prepare = s.prepare_problem
-    monkeypatch.setattr(s, "prepare_problem", spy_prepare)
-    # route operator_arrays through the test helper's solve() call
-    monkeypatch.setattr(s, "solve", lambda **kw: original(operator_arrays={"ms": ms}, **kw))
+    problem = _problem(0.0, unitary=_unitary(3))
+    ms = np.asfortranarray(problem[0].copy())
+    original = solve.solve
+    monkeypatch.setattr(solve, "solve", lambda **kw: original(operator_arrays={"ms": ms}, **kw))
     _solve(shared_tmp_path, monkeypatch, "3 3", problem)
-    assert captured and captured[0] is not None
-    op_in = arrays_holder["operators"]
-    np.testing.assert_allclose(op_in.sz, ms)
-    # the rotation into the fit basis is a unitary change of basis: the spectrum is preserved
-    np.testing.assert_allclose(
-        np.sort(np.linalg.eigvalsh(captured[0].sz)), np.sort(np.linalg.eigvalsh(ms)), atol=1e-10
-    )
+
+    ops, rot_to_spherical = captured[0]
+    R = rot_to_spherical.conj().T
+    assert np.abs(R - np.eye(len(R))).max() > 0.1, "the test needs a non-trivial fit rotation"
+    np.testing.assert_allclose(ops.sz, R.conj().T @ ms @ R, atol=1e-10)
+    assert np.abs(ops.sz - R @ ms @ R.conj().T).max() > 0.1
+
+
+def test_operator_arrays_must_have_the_stated_shape():
+    with pytest.raises(ValueError, match="shape"):
+        solve.build_operators({"ms": np.zeros(9)}, 3)
+    with pytest.raises(ValueError, match="shape"):
+        solve.build_operators({"dxyz": np.zeros((3, 3, 2))}, 3)

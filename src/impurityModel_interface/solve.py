@@ -164,9 +164,17 @@ def build_operators(arrays, n_orb):
     unknown = set(present) - set(names) - {"dxyz"}
     if unknown:
         raise ValueError(f"unknown operator arrays {sorted(unknown)}")
-    kwargs = {names[k]: np.array(v, dtype=complex).reshape(n_orb, n_orb) for k, v in present.items() if k in names}
+
+    def shaped(name, value, shape):
+        # Require the shape rather than reshape: a flat Fortran buffer would otherwise be transposed silently.
+        value = np.array(value, dtype=complex)
+        if value.shape != shape:
+            raise ValueError(f"operator array {name} has shape {value.shape}, expected {shape}")
+        return value
+
+    kwargs = {names[k]: shaped(k, v, (n_orb, n_orb)) for k, v in present.items() if k in names}
     if "dxyz" in present:
-        kwargs["dipole"] = np.moveaxis(np.array(present["dxyz"], dtype=complex).reshape(n_orb, n_orb, 3), -1, 0)
+        kwargs["dipole"] = np.moveaxis(shaped("dxyz", present["dxyz"], (n_orb, n_orb, 3)), -1, 0)
     return LocalOperators(source="rspt", frame="global", **kwargs)
 
 
@@ -174,7 +182,11 @@ def _report_operator_check(operators, rot_to_spherical, comm):
     """Print how far RSPt's operators are from the spherical rebuild (they agree for a trivial site frame)."""
     if comm.rank != 0 or operators is None:
         return
-    spherical = LocalOperators.from_spherical(rot_to_spherical, (_shell_l(rot_to_spherical),))
+    l = _shell_l(rot_to_spherical)
+    if l is None:
+        print("RSPt operators: no single spin-resolved shell, so no spherical rebuild to compare with.", flush=True)
+        return
+    spherical = LocalOperators.from_spherical(rot_to_spherical, (l,))
     parts = []
     for name in ("sz", "s_plus", "lz", "l_plus"):
         got, ref = getattr(operators, name), getattr(spherical, name)
@@ -184,7 +196,10 @@ def _report_operator_check(operators, rot_to_spherical, comm):
 
 
 def _shell_l(rot_to_spherical):
-    return (rot_to_spherical.shape[1] // 2 - 1) // 2
+    """``l`` when the rotation spans exactly one spin-resolved shell, else ``None`` (several or partial shells)."""
+    n = rot_to_spherical.shape[1]
+    l = (n // 2 - 1) // 2
+    return l if n == 2 * (2 * l + 1) and n == rot_to_spherical.shape[0] else None
 
 
 def prepare_problem(
@@ -380,9 +395,16 @@ def solve(
     comm.Bcast(u4)
     comm.Bcast(sig_dc)
     comm.Bcast(hyb)
-    operators = build_operators(operator_arrays, n_orb)
-    if operators is not None:
-        operators = comm.bcast(operators)
+    # Built on the root only and broadcast unconditionally: every rank must reach the collective, and a
+    # malformed input must fail everywhere rather than leave the other ranks waiting.
+    try:
+        operators = build_operators(operator_arrays, n_orb) if comm.rank == 0 else None
+        failure = None
+    except ValueError as exc:
+        operators, failure = None, str(exc)
+    operators, failure = comm.bcast((operators, failure))
+    if failure is not None:
+        raise ValueError(failure)
 
     # For python, it makes more sense to put the frequency index first, instead of last
     sig_python = np.moveaxis(sig, -1, 0)
