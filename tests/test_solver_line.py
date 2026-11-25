@@ -121,7 +121,8 @@ def test_settings_header_lists_the_line_and_the_run():
     header = format_settings_header(parse_solver_line("8 10 symm_prec 0.05"), tau=0.01, delta=0.1)
     rows = {row.split("|>")[0].strip(): row.split("|>")[1].strip() for row in header.splitlines()}
     assert rows["Nominal imp. occupation"] == "8"
-    assert rows["Bath states per imp. orb."] == "10"
+    assert rows["Bath states per block (avg.)"] == "10"
+    assert rows["Min. hybridization weight (rel.)"] == "0.05"
     assert rows["Bath geometry"] == "peeled_linked_chain"
     assert rows["Neglected coupling (relative)"] == "0.05"
     assert rows["Temperature tau"] == "0.01"

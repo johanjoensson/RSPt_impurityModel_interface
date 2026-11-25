@@ -5,9 +5,9 @@ restructured.  What each criterion means, and why the modifiers exist, is in ``d
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
-STATIC_SCHEMES = frozenset({"amf", "sigma_inf", "sigmainf", "nominal"})
+STATIC_SCHEMES = frozenset({"fll", "amf", "sigma_inf", "sigmainf", "nominal"})
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,8 @@ class DCRequest:
     #: ``gap``, ``occupation``, ``peak`` or one of :data:`STATIC_SCHEMES`.
     mode: str
     #: The criterion's number (gap offset, occupation, peak position); ``None`` where it takes none.
-    target: Optional[float]
+    #: ``fll`` given one occupation per shell holds a tuple of them.
+    target: Optional[Union[float, tuple]]
     #: Damping against the previous iteration's answer.
     alpha: float = 0.5
     #: PT2 admission floor of the charge-sector solves (``None``: the solver's default).
@@ -91,7 +92,13 @@ def parse_dc_line(dc_line):
             )
         mode, target = "occupation", (float(words[1]) if len(words) == 2 else None)
     elif head in {"fll"}:
-        mode, target = "fll", (float(words[1]) if len(words) == 2 else None)
+        # One occupation, or one per shell: 'fll 2,6' (as N0 on the solver line) or 'fll 2 6'.
+        values = [v for word in words[1:] for v in word.split(",") if v]
+        try:
+            numbers = tuple(float(v) for v in values)
+        except ValueError:
+            raise ValueError(f"'fll' takes impurity occupations (one, or one per shell), got {words[1:]}") from None
+        mode, target = "fll", (None if not numbers else numbers[0] if len(numbers) == 1 else numbers)
     elif head in STATIC_SCHEMES:
         if len(words) != 1:
             raise ValueError(f"impurityModel static double counting ({head}) takes no further arguments. Got: {words}")
@@ -100,7 +107,8 @@ def parse_dc_line(dc_line):
         if len(words) != 1:
             raise ValueError(
                 "impurityModel double counting takes 1 argument, peak_position, 'gap [offset]', "
-                f"'occ [target impurity occupation]', 'fll [impurity Occupation]', or one of amf/sigma_inf/nominal. Got: {words}"
+                "'occ [target impurity occupation]', 'fll [occupation, or one per shell: N1,N2,...]', "
+                f"or one of amf/sigma_inf/nominal. Got: {words}"
             )
         mode, target = "peak", float(words[0])
     if de2_min is not None and mode in STATIC_SCHEMES:

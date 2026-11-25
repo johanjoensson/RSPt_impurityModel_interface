@@ -32,7 +32,7 @@ def _banner(rank, headline, error, with_traceback):
     print("!" * 100)
 
 
-def _criterion(request, model, basis, solver, *, w, tau, nominal_total, comm, verbosity, cap_ledger):
+def _criterion(request, model, basis, solver, *, w, tau, nominal_occ, comm, verbosity, cap_ledger):
     """Evaluate the requested criterion.  Returns ``(dc, sector)``; ``sector`` is ``None`` for static schemes."""
     solves = {
         "comm": comm,
@@ -80,7 +80,7 @@ def _criterion(request, model, basis, solver, *, w, tau, nominal_total, comm, ve
     if request.mode in ("sigma_inf", "sigmainf"):
         return sigma_inf_dc(model, tau=tau), None
     assert request.mode == "nominal"
-    return nominal_dc(model, nominal_total), None
+    return nominal_dc(model, nominal_occ), None
 
 
 def run_double_counting(
@@ -94,7 +94,7 @@ def run_double_counting(
     corr_to_solver,
     w,
     tau,
-    nominal_total,
+    nominal_occ,
     comm,
     verbosity,
     cap_ledger,
@@ -121,7 +121,7 @@ def run_double_counting(
             solver,
             w=w,
             tau=tau,
-            nominal_total=nominal_total,
+            nominal_occ=nominal_occ,
             comm=comm,
             verbosity=verbosity,
             cap_ledger=cap_ledger,

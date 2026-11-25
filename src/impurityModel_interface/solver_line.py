@@ -22,7 +22,7 @@ class SolverLine:
 
     #: Nominal impurity occupation, in total.
     nominal_occ: int
-    #: Bath states per impurity orbital.
+    #: Bath states per hybridizing block, on average (the fit shares the pool out by weight).
     n_baths: int
     fit: FitOptions
     basis: BasisOptions
@@ -75,7 +75,7 @@ def parse_solver_line(solver_line):
 def format_settings_header(line, tau=None, delta=None):
     """The output-file header listing every setting of this run, from the options' own descriptions."""
     n0 = ",".join(str(n) for n in line.nominal_per_shell) if len(line.nominal_per_shell) > 1 else line.nominal_occ
-    rows = [("Nominal imp. occupation", n0), ("Bath states per imp. orb.", line.n_baths)]
+    rows = [("Nominal imp. occupation", n0), ("Bath states per block (avg.)", line.n_baths)]
     rows += line.fit.describe()
     rows += describe_options(line.basis, line.solver)
     if tau is not None:

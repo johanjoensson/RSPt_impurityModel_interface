@@ -18,8 +18,9 @@ from impurityModel.api import (
     site_frames,
 )
 from rspt2spectra.block_structure import project_to_blocks
-from rspt2spectra.h0 import bath_hybridization
-from rspt2spectra.hyb_fit import HYB_WEIGHT_REL_TOL
+from rspt2spectra.h0 import bath_hybridization, fit_window
+from rspt2spectra.hyb_fit import hybridization_weight
+from rspt2spectra.weight_functions import weight_functions
 from rspt2spectra.utils import rotate_4index_U, rotate_Greens_function, rotate_matrix
 
 from . import archive
@@ -153,18 +154,31 @@ def shell_orbital_counts(corr_to_spherical, shell_ls):
     return [int(np.sum(index == a)) for a in range(len(shell_ls))], index
 
 
-def hybridizing_shells(hyb, w, orbital_shell, n_shells):
-    """Shells whose hybridization weight is above :data:`HYB_WEIGHT_REL_TOL` of the strongest one.
+def hybridizing_shells(hyb, w, orbital_shell, n_shells, options):
+    """Shells whose hybridization weight is above ``options.hyb_tol`` of the strongest one.
 
-    ``hyb`` has the frequency first and is in RSPt's basis.  The weight of a shell is the integral of
-    ``-Im`` of the trace over its orbitals.
+    ``hyb`` has the frequency first and is in RSPt's basis.  The weight is measured the way the
+    bath fit allocates its states (:func:`rspt2spectra.hyb_fit.hybridization_weight`): on the fit
+    window (cut at the Fermi level unless ``fit_unocc``), with the fit's weight function.  Measured
+    over the whole mesh a core shell can look strongly hybridizing from its weight above the Fermi
+    level (Ni 2p in NiO: 18% of the 3d weight instead of 1.4%).
     """
+    lo, hi = fit_window(w, hyb, not options.fit_unocc)
+    mask = (lo <= w) & (w < hi)
+    weight_fun = weight_functions[options.weight_function](options.weight_w0, options.weight)
     weights = np.zeros(n_shells)
     for a in range(n_shells):
         idx = np.flatnonzero(orbital_shell == a)
-        trace = np.einsum("wii->w", hyb[:, idx][:, :, idx])
-        weights[a] = max(float(np.trapezoid(-np.imag(trace), w)), 0.0)
-    return {a for a in range(n_shells) if weights[a] > HYB_WEIGHT_REL_TOL * weights.max()}
+        weights[a] = max(hybridization_weight(hyb[mask][:, idx][:, :, idx], w[mask], weight_fun), 0.0)
+    return {a for a in range(n_shells) if weights[a] > options.hyb_tol * weights.max()}
+
+
+def shells_with_bath(v, orbital_shell, n_shells):
+    """Shells that at least one bath state couples to; ``v`` is (n_bath, n_orb) in RSPt's basis."""
+    scale = np.max(np.abs(v), initial=0.0)
+    if scale == 0:
+        return set()
+    return {a for a in range(n_shells) if np.max(np.abs(v[:, orbital_shell == a]), initial=0.0) > 1e-8 * scale}
 
 
 def _check_shells(call, line):
@@ -217,7 +231,7 @@ def prepare_problem(call, line, comm):
     movable = None
     hybridizing = frozenset({0})
     if orbital_shell is not None:
-        hybridizing = hybridizing_shells(hyb, w, orbital_shell, len(shell_ls))
+        hybridizing = hybridizing_shells(hyb, w, orbital_shell, len(shell_ls), line.fit)
         # Charge is restricted to the hybridizing shells only where there is a choice to make; a single
         # shell (or none hybridizing at all) keeps the unrestricted rule.
         movable = hybridizing if len(shell_ls) > 1 and hybridizing else None
@@ -275,6 +289,15 @@ def prepare_problem(call, line, comm):
         extra_verbose=(verbosity >= 2),
         comm=comm,
     )
+    if orbital_shell is not None and line.n_baths > 0 and rank == 0:
+        # The shell rule above and the fit's block rule compare against different references (the
+        # strongest shell, the strongest block); say so when they disagree.
+        with_bath = shells_with_bath(fitted.v, orbital_shell, len(shell_ls))
+        if with_bath != set(hybridizing):
+            print(
+                f"WARNING: shells {sorted(with_bath)} got bath states but shells {sorted(hybridizing)} count as "
+                f"hybridizing (hyb_tol {line.fit.hyb_tol:g}); the charge restriction follows the latter."
+            )
     # The fit neglected the couplings between blocks (symm_prec) in its own basis, in which the
     # impurity block, the hopping and the double counting are exactly block diagonal.  That is the
     # basis the solver must work in: rotated back to RSPt's basis the neglected couplings are

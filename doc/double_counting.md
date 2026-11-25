@@ -9,8 +9,23 @@ restructured, because RSPt rewrites it for DC in {-4,-5,-14,-15}.
 | `<peak_position>` | Place a spectral peak at that energy: `E[N+1]-E[N]` if positive, `E[N]-E[N-1]` if negative. |
 | `gap [offset]` | Centre the impurity gap, i.e. put the midpoint `(E[N+1]-E[N-1])/2` of the removal and addition excitations at `offset` (default 0, the Fermi level). **Recommended for insulators:** Karolak et al. (arXiv:1004.4569) show the occupation condition "essentially breaks down" for a charge-transfer insulator, because inside a gap the occupation is flat and a whole interval of mu satisfies it. For NiO they get 25.3 eV this way against 20.4 (SC)AMF; 21 eV is qualitatively wrong. |
 | `occ [N]` | Fix the thermal impurity occupation (Karolak's Eq. 2; the right criterion for metals). |
-| `fll`, `amf`, `sigma_inf` | Static schemes evaluated at the DFT reference occupation/density matrix; no ED solve. |
+| `fll [N]`, `amf`, `sigma_inf` | Static schemes evaluated at the DFT reference occupation/density matrix; no ED solve. |
 | `nominal` | FLL at the *nominal* (integer) occupation: needs no reference filling, so it cannot saturate. The natural guess for CSC iteration 1, or a reference for checking a converged `occ` answer. |
+
+## Several shells
+
+On a cluster of several shells (several blocks in RSPt's `preoffset`), every criterion still works:
+
+* `fll`, `amf`, `nominal` are evaluated **per shell** (impurityModel `dc_static`). Each shell has its
+  own occupation (DFT reference, or its entry of `N0` for `nominal`) and its own `(U, J)` from its
+  block of `u4`. It also feels the Hartree and averaged exchange of the other shells' charge, from
+  the inter-shell elements of `u4`. The result is block-diagonal by shell. `fll N1,N2,...` (or
+  `fll N1 N2 ...`) sets the occupations explicitly, one per shell in shell order, as `N0` on the
+  solver line. A count that does not match the shells is refused: one number is never split.
+* `gap`, `occ`, `peak` shift only the shells a bath hops to. A shell without a bath (a core) cannot
+  be fixed by any of these criteria, so its double counting is FLL at the nominal occupations `N0`
+  of all shells, which includes the Hartree of the other shells. This is held fixed during the search.
+* `sigma_inf` is `Σ_static(u4, ρ_DFT)` over the whole impurity, as before.
 
 ## Modifiers (anywhere on the line)
 

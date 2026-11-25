@@ -60,7 +60,7 @@ def fit_h0(
         Local Hamiltonian and real-frequency hybridization function (``hyb`` has the frequency
         first), in RSPt's correlated basis.
     n_baths : int
-        Bath states per impurity orbital.
+        Bath states per hybridizing block, on average.
     options : rspt2spectra.FitOptions
     u4, rot_to_spherical : np.ndarray
         The Coulomb tensor and the map to spherical harmonics, which steer the choice of fitting

@@ -28,8 +28,16 @@ from .problem import Problem, _report_fit, prepare_problem, split_total_over_gro
 from .solver_line import parse_solver_line
 
 
-#: The closed-form double countings impurityModel refuses for several shells (``dc_static``).
-SINGLE_SHELL_SCHEMES = frozenset({"fll", "amf", "nominal"})
+def _check_fll_occupations(target, shell_ls):
+    """``fll N`` on one shell, ``fll N1,N2,...`` with one occupation per shell on several."""
+    count = len(target) if isinstance(target, tuple) else 1
+    n_shells = max(1, len(shell_ls))  # no layout sent: one block, the single-shell path
+    if count != n_shells:
+        raise ValueError(
+            f"'fll' was given {count} occupation(s), but this cluster has {n_shells} shell(s) "
+            f"(l = {list(shell_ls)}): give one per shell, comma-separated in the order of the shells "
+            "(as N0 on the solver line), or none to use each shell's DFT occupation."
+        )
 
 
 @contextmanager
@@ -78,11 +86,8 @@ def solve(call, comm=None):
                 flush=True,
             )
         request = parse_dc_line(call.dc_line) if call.task == "dc" else None
-        if request is not None and len(call.shells.shell_ls) > 1 and request.mode in SINGLE_SHELL_SCHEMES:
-            raise ValueError(
-                f"The double counting '{request.mode}' is defined for one shell; this cluster has "
-                f"{len(call.shells.shell_ls)} (l = {list(call.shells.shell_ls)}). Use sigma_inf or an ED criterion (gap, occupation, peak)."
-            )
+        if request is not None and request.mode == "fll" and request.target is not None:
+            _check_fll_occupations(request.target, call.shells.shell_ls)
         problem = prepare_problem(call, line, comm)
         on_root(
             comm,
@@ -138,7 +143,7 @@ def run_double_counting(problem, call, request, comm):
         corr_to_solver=problem.corr_to_solver,
         w=call.w,
         tau=call.tau,
-        nominal_total=sum(problem.basis.nominal_occ.values()),
+        nominal_occ=problem.basis.nominal_occ,
         comm=comm,
         verbosity=call.verbosity,
         cap_ledger=problem.cap_ledger,

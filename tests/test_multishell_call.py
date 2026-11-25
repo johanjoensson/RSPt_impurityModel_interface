@@ -102,12 +102,57 @@ def test_n0_cannot_exceed_the_orbitals_of_its_shell(shared_tmp_path, monkeypatch
         _run(shared_tmp_path, monkeypatch, f)
 
 
-@pytest.mark.parametrize("scheme", sorted(solve.SINGLE_SHELL_SCHEMES))
-def test_a_single_shell_double_counting_is_refused_for_several_shells(
-    scheme, shared_tmp_path, monkeypatch, restore_stdout
-):
-    with pytest.raises(ValueError, match="one shell"):
-        _run(shared_tmp_path, monkeypatch, _fields(task=1, dc_line=scheme))
+def _direct_u4(intra=0.5, inter=0.3):
+    """Direct Coulomb only: ``intra`` within a shell, ``inter`` between s (0-1) and p (2-7)."""
+    shell = np.array([0, 0] + [1] * 6)
+    u4 = np.zeros((N,) * 4, complex)
+    for i in range(N):
+        for j in range(N):
+            if i != j:
+                u4[i, j, i, j] = intra if shell[i] == shell[j] else inter
+    return u4
+
+
+def test_nominal_double_counting_is_evaluated_per_shell(shared_tmp_path, monkeypatch, restore_stdout):
+    """FLL at each shell's N0, plus the Hartree of the other shell: s 0.5(2-1/2) + 0.3*6, p 0.5(6-1/2) + 0.3*2."""
+    f = _fields(task=1, dc_line="nominal")
+    f["solver_paramstr"] = "2,6 2"
+    f["ctx%u4"] = _direct_u4()
+    assert _run(shared_tmp_path, monkeypatch, f) == 0
+    np.testing.assert_allclose(np.diag(f["sig_dc"]).real, [2.55] * 2 + [3.35] * 6, atol=1e-12)
+    assert not np.abs(f["sig_dc"][:2, 2:]).any()
+
+
+@pytest.mark.parametrize("scheme", ["fll", "amf"])
+def test_the_static_schemes_run_on_several_shells(scheme, shared_tmp_path, monkeypatch, restore_stdout):
+    f = _fields(task=1, dc_line=scheme)
+    f["solver_paramstr"] = "2,6 2"
+    f["ctx%u4"] = _direct_u4()
+    assert _run(shared_tmp_path, monkeypatch, f) == 0
+    dc = np.diag(f["sig_dc"]).real
+    assert np.ptp(dc[:2]) < 1e-12 and np.ptp(dc[2:]) < 1e-12 and dc[0] != dc[2]
+
+
+@pytest.mark.parametrize("line", ["fll 2,6", "fll 2 6"])
+def test_fll_takes_one_occupation_per_shell(line, shared_tmp_path, monkeypatch, restore_stdout):
+    """Given N = (2, 6) it is the nominal double counting of the fixture above."""
+    f = _fields(task=1, dc_line=line)
+    f["ctx%u4"] = _direct_u4()
+    assert _run(shared_tmp_path, monkeypatch, f) == 0
+    np.testing.assert_allclose(np.diag(f["sig_dc"]).real, [2.55] * 2 + [3.35] * 6, atol=1e-12)
+
+
+def test_one_fll_occupation_is_accepted_on_a_single_shell_or_without_a_layout():
+    solve._check_fll_occupations(8.5, (2,))
+    solve._check_fll_occupations(8.5, ())
+    with pytest.raises(ValueError, match="one per shell"):
+        solve._check_fll_occupations((8.0, 1.0), ())
+
+
+@pytest.mark.parametrize("line", ["fll 3", "fll 2,6,1"])
+def test_fll_occupations_must_match_the_shells(line, shared_tmp_path, monkeypatch, restore_stdout):
+    with pytest.raises(ValueError, match="one per shell"):
+        _run(shared_tmp_path, monkeypatch, _fields(task=1, dc_line=line))
 
 
 def test_sigma_inf_is_not_refused_up_front(shared_tmp_path, monkeypatch, restore_stdout):
