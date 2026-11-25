@@ -72,12 +72,16 @@ def _invoke(ffi, monkeypatch, recorder, arrays=None, abi_version=entry.ABI_VERSI
     return status, keep
 
 
+def _output(call, name):
+    return getattr(call.out, name)
+
+
 def test_writes_into_the_outputs_land_in_rspt_memory(rspt_memory, monkeypatch):
     """The only way results reach RSPt. Copy any of these and the solve returns nothing."""
 
-    def recorder(**kw):
+    def recorder(call):
         for i, name in enumerate(OUTPUTS):
-            kw[name][...] = complex(i + 1, -(i + 1))
+            _output(call, name)[...] = complex(i + 1, -(i + 1))
         return 0
 
     status, keep = _invoke(rspt_memory, monkeypatch, recorder)
@@ -89,9 +93,9 @@ def test_writes_into_the_outputs_land_in_rspt_memory(rspt_memory, monkeypatch):
 def test_writes_into_the_inputs_land_in_rspt_memory(rspt_memory, monkeypatch):
     """comm.Bcast writes through these on every non-root rank."""
 
-    def recorder(**kw):
+    def recorder(call):
         for i, name in enumerate(INPUTS.values()):
-            kw[name][...] = complex(10 + i, 0)
+            getattr(call, name)[...] = complex(10 + i, 0)
         return 0
 
     status, keep = _invoke(rspt_memory, monkeypatch, recorder)
@@ -103,9 +107,9 @@ def test_writes_into_the_inputs_land_in_rspt_memory(rspt_memory, monkeypatch):
 def test_h_dft_is_a_copy_and_rspts_hamiltonian_is_untouched(rspt_memory, monkeypatch):
     seen = {}
 
-    def recorder(**kw):
-        seen.update(kw)
-        kw["h_dft"][...] = 99  # what Bcast and the fit may do
+    def recorder(call):
+        seen["h_dft"] = call.h_dft
+        call.h_dft[...] = 99  # what Bcast and the fit may do
         return 0
 
     arrays = cluster_arrays()
@@ -117,8 +121,9 @@ def test_h_dft_is_a_copy_and_rspts_hamiltonian_is_untouched(rspt_memory, monkeyp
 def test_the_views_are_fortran_ordered_and_own_nothing(rspt_memory, monkeypatch):
     seen = {}
 
-    def recorder(**kw):
-        seen.update(kw)
+    def recorder(call):
+        seen.update({name: _output(call, name) for name in OUTPUTS})
+        seen.update(u4=call.u4, hyb=call.hyb)
         return 0
 
     _invoke(rspt_memory, monkeypatch, recorder)
@@ -134,36 +139,38 @@ def test_the_views_are_fortran_ordered_and_own_nothing(rspt_memory, monkeypatch)
 def test_the_shapes_match_what_rspt_allocated(rspt_memory, monkeypatch):
     seen = {}
 
-    def recorder(**kw):
-        seen.update(kw)
+    def recorder(call):
+        seen["call"] = call
         return 0
 
     _invoke(rspt_memory, monkeypatch, recorder)
-    assert seen["h_dft"].shape == (N_ORB, N_ORB)
-    assert seen["u4"].shape == (N_ORB,) * 4
-    assert seen["hyb"].shape == (N_ORB, N_ORB, N_W)
-    assert seen["sig"].shape == (N_ORB, N_ORB, N_IW)
-    assert seen["sig_real"].shape == (N_ORB, N_ORB, N_W)
-    assert seen["iw"].shape == (N_IW,)
-    assert seen["w"].shape == (N_W,)
-    assert (seen["n_orb"], seen["n_rot_cols"], seen["n_orb_full"]) == (N_ORB, N_ORB, N_ORB)
+    call = seen["call"]
+    assert call.h_dft.shape == (N_ORB, N_ORB)
+    assert call.u4.shape == (N_ORB,) * 4
+    assert call.hyb.shape == (N_ORB, N_ORB, N_W)
+    assert call.out.sig.shape == (N_ORB, N_ORB, N_IW)
+    assert call.out.sig_real.shape == (N_ORB, N_ORB, N_W)
+    assert call.iw.shape == (N_IW,)
+    assert call.w.shape == (N_W,)
+    assert (call.shells.nspmat, call.shells.preoffset, call.shells.offset) == (2, (0, N_ORB), (0, N_ORB))
 
 
 def test_the_fixed_width_fortran_strings_arrive_as_stripped_str(rspt_memory, monkeypatch):
     seen = {}
 
-    def recorder(**kw):
-        seen.update(kw)
+    def recorder(call):
+        seen["call"] = call
         return 0
 
     _invoke(rspt_memory, monkeypatch, recorder)
-    assert seen["label"] == "Ni-3d"
-    assert seen["solver_line"] == "8 10"
-    assert seen["dc_line"] == "gap 0.5"
+    call = seen["call"]
+    assert call.label == "Ni-3d"
+    assert call.solver_line == "8 10"
+    assert call.dc_line == "gap 0.5"
 
 
 def test_a_wrong_abi_version_is_refused_before_anything_is_read(rspt_memory, monkeypatch):
-    def recorder(**kw):
+    def recorder(call):
         raise AssertionError("solve must not be reached")
 
     with pytest.raises(RuntimeError, match="ABI version"):

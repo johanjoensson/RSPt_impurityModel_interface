@@ -23,8 +23,10 @@ come from `rspt2spectra.parse_fit_tokens`, the solver options from
 | Module | Job |
 |---|---|
 | `entry.py` | what RSPt calls (`run_impmod_cluster`): CFFI stub and callback, `[environment]` file |
-| `rspt_fields.py` | RSPt's cluster as a `name -> numpy view` mapping; `solve_arguments` derives `h_dft`, the rotation, the dipole and the symmetry stack from it |
-| `solve.py` | one DMFT step: `prepare_problem`, `run_double_counting`, `run_selfenergy` |
+| `rspt_fields.py` | RSPt's cluster as a `name -> numpy view` mapping (decoding only) |
+| `cluster.py` | `ClusterCall.from_fields`: `h_dft`, the rotation, the shell layout (`Shells`), the operators and the output views (`Outputs`) derived from that mapping; the task (`dc`, `selfenergy`, `spectra`) |
+| `problem.py` | `prepare_problem`: fit, model and reports for one call; `Problem` |
+| `solve.py` | `solve(call)` and the tasks: `run_double_counting`, `run_selfenergy`, `run_spectra` |
 | `h0_fit.py` | Δ(ω) to h0 through rspt2spectra, with bath-fit reuse and warm start |
 | `solver_line.py`, `dc_line.py` | the two line grammars RSPt passes |
 | `double_counting.py` | DC criterion dispatch and damping |

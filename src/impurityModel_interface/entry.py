@@ -77,7 +77,8 @@ from impurityModel.api import apply_environment, find_environment_file, load_env
 # Version of the ``impmod_field`` record layout; RSPt passes its own value as the last argument
 # (``impmod_abi_version`` in ``green_impmod_interface.F90``) and any other value is refused.
 # 3 replaced the positional argument list by a table of named fields (see ``rspt_fields``).
-from .rspt_fields import ABI_VERSION, FIELD_SIZE, RsptFields, solve_arguments  # noqa: E402
+from .cluster import ClusterCall  # noqa: E402
+from .rspt_fields import ABI_VERSION, FIELD_SIZE, RsptFields  # noqa: E402
 from .solve import solve  # noqa: E402
 
 
@@ -108,7 +109,7 @@ def _run_impmod_ed(rspt_fields, n_fields, abi_version):
             f"impmod_field is {ffi.sizeof('impmod_field')} bytes in this library, RSPt builds {FIELD_SIZE}-byte records."
         )
     fields = RsptFields(ffi, rspt_fields, n_fields)
-    return solve(**solve_arguments(fields))
+    return solve(ClusterCall.from_fields(fields))
 
 
 # ``error=-1`` is load bearing. cffi's default for an uncaught exception in a callback is to

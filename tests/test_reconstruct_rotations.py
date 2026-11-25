@@ -19,7 +19,32 @@ import pytest
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: F401
 
-from impurityModel_interface.solve import reconstruct_corr_to_spherical
+from impurityModel_interface.cluster import Shells
+
+
+def reconstruct_corr_to_spherical(corr_to_spherical_in, n_orb, n_rot_cols, n_orb_full):
+    return Shells.from_layout(n_orb, n_rot_cols, n_orb_full).corr_to_spherical(corr_to_spherical_in, n_orb)
+
+
+def _reference(corr_to_spherical_in, n_orb, n_rot_cols, n_orb_full):
+    """The single-shell implementation this replaced, kept as the thing the segment-aware one must equal."""
+    if n_rot_cols == n_orb:
+        return np.array(corr_to_spherical_in)
+    n_half = n_orb // 2
+    out = np.zeros((n_orb, 2 * n_orb_full), dtype=complex)
+    out[:n_half, :n_orb_full] = corr_to_spherical_in[:n_half, :]
+    out[n_half:, n_orb_full:] = corr_to_spherical_in[:n_half, :]
+    return out
+
+
+@pytest.mark.parametrize("n_orb, n_rot_cols, n_orb_full", [(10, 5, 5), (6, 3, 5), (10, 10, 10), (6, 6, 10)])
+def test_single_shell_equals_the_previous_implementation_bit_for_bit(n_orb, n_rot_cols, n_orb_full):
+    rng = np.random.default_rng(11)
+    sph_in = _one_spin_inputs(n_orb, n_rot_cols, n_orb_full, rng) if n_rot_cols != n_orb else rng.random((n_orb, n_orb_full)) + 0j
+    np.testing.assert_array_equal(
+        reconstruct_corr_to_spherical(sph_in, n_orb, n_rot_cols, n_orb_full),
+        _reference(sph_in, n_orb, n_rot_cols, n_orb_full),
+    )
 
 
 def _one_spin_inputs(n_orb, n_rot_cols, n_orb_full, rng):

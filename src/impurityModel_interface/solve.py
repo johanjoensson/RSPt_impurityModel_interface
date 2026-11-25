@@ -1,9 +1,9 @@
-"""One RSPt call: the double-counting search or the self-energy solve, on marshalled arrays.
+"""One RSPt call: the double-counting search, the self-energy solve or the spectra, from a :class:`ClusterCall`.
 
 RSPt calls the solver twice per self-consistency iteration, once for the double counting
-(``dc_flag == 1``) and once for the self-energy.  Both start from the same problem -- RSPt's
-quantities rotated into the fitting basis, the fitted h0, the solver model -- built by
-:func:`prepare_problem`; :func:`run_double_counting` and :func:`run_selfenergy` finish the call.
+(task ``"dc"``) and once for the self-energy (``"selfenergy"``).  Both start from the same
+problem -- RSPt's quantities rotated into the fitting basis, the fitted h0, the solver model --
+built by :func:`problem.prepare_problem`; the entries of :data:`TASKS` finish the call.
 
 The arrays are RSPt's own memory and are mutated in place (see :mod:`impurityModel_interface.entry`).
 """
@@ -12,109 +12,34 @@ import re
 import sys
 import traceback
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
 from os import devnull
 
 import numpy as np
-from impurityModel.api import (
-    CapLedger,
-    ImpurityModel,
-    LocalOperators,
-    Meshes,
-    calc_selfenergy,
-    discretized_impurity_occupation,
-    report_continuum_reference,
-    save_Greens_function,
-    site_frames,
-)
+from impurityModel.api import Meshes, calc_selfenergy
 from mpi4py import MPI
-from rspt2spectra.block_structure import project_to_blocks
-from rspt2spectra.h0 import bath_hybridization
-from rspt2spectra.utils import rotate_4index_U, rotate_Greens_function, rotate_matrix
+from rspt2spectra.utils import rotate_Greens_function
 
 from . import archive
+from .cluster import TASKS as TASK_NAMES
 from .dc_line import parse_dc_line
 from .double_counting import run_double_counting as search_double_counting
-from .h0_fit import fit_h0
 from .mpi import on_root
-from .solver_line import format_settings_header, parse_solver_line, with_temperature
+from .problem import Problem, _report_fit, prepare_problem, split_total_over_groups  # noqa: F401
+from .solver_line import parse_solver_line
 
 
-def reconstruct_corr_to_spherical(corr_to_spherical_in, n_orb, n_rot_cols, n_orb_full):
-    """
-    Return ``corr_to_spherical`` with both spin blocks present.
-
-    RSPt dimensions the rotation matrices with nspmat spins (1 for
-    non-spin-polarized calculations without SOC, 2 otherwise), while the
-    hamiltonian, hybridization function and selfenergies always carry both
-    spins (n_orb rows). When only one spin block is sent
-    (n_rot_cols == n_orb/2), duplicate it onto the spin-up block; the
-    correlated basis rows are ordered [spin-down block, spin-up block].
-
-    RSPt's ``corr_to_cf`` is not used: the fitting basis is chosen from the data in
-    RSPt's correlated basis (see :func:`prepare_problem`).  Its column count
-    ``n_rot_cols`` still tells how many spins RSPt sent.
-
-    Parameters:
-    corr_to_spherical_in -- (n_orb, n_orb_full) rotation from the correlated
-                            basis to spherical harmonics, n_orb_full counts
-                            nspmat spins.
-    n_orb                -- Number of correlated spin-orbitals (2 spins).
-    n_rot_cols           -- Number of CF columns sent by RSPt (spin count only).
-    n_orb_full           -- Spherical-harmonics dimension sent by RSPt.
-    """
-    if n_rot_cols == n_orb:
-        # The matrices already carry both spins (spin-polarized or SOC).
-        # corr_to_spherical may be rectangular (n_orb < n_orb_full) when the
-        # correlated set is a subset of the shell (e.g. t2g only).
-        return np.array(corr_to_spherical_in)
-    if 2 * n_rot_cols == n_orb:
-        n_half = n_orb // 2
-        corr_to_spherical = np.zeros((n_orb, 2 * n_orb_full), dtype=complex)
-        corr_to_spherical[:n_half, :n_orb_full] = corr_to_spherical_in[:n_half, :]
-        corr_to_spherical[n_half:, n_orb_full:] = corr_to_spherical_in[:n_half, :]
-        return corr_to_spherical
-    raise RuntimeError(
-        f"Inconsistent rotation shapes from RSPt: n_orb={n_orb}, "
-        f"n_rot_cols={n_rot_cols}, n_orb_full={n_orb_full}; "
-        "expected n_rot_cols == n_orb or 2*n_rot_cols == n_orb."
-    )
-
-
-def split_total_over_groups(total, nominal_occ):
-    """Distribute an impurity charge ``total`` over the groups of ``nominal_occ``.
-
-    Keeps the incoming split as the shape and moves only the difference, so a multi-group
-    impurity (an ``eg``/``t2g`` split) stays near the filling RSPt asked for instead of being
-    re-derived from scratch. The groups redistribute freely at fixed total inside the solver
-    anyway (``basis_generation.generate_initial_basis``), so this only has to be a sensible seed.
-    """
-    occ = dict(nominal_occ)
-    delta = int(total) - sum(occ.values())
-    keys = sorted(occ)
-    step = 1 if delta > 0 else -1
-    while delta != 0 and keys:
-        moved = False
-        for key in keys:
-            if delta == 0:
-                break
-            if occ[key] + step >= 0:
-                occ[key] += step
-                delta -= step
-                moved = True
-        if not moved:
-            break
-    return occ
+#: The closed-form double countings impurityModel refuses for several shells (``dc_static``).
+SINGLE_SHELL_SCHEMES = frozenset({"fll", "amf", "nominal"})
 
 
 @contextmanager
-def redirected_stdout(label, dc_flag, comm, verbosity):
+def redirected_stdout(label, task, comm, verbosity):
     """Send ``print`` to this call's output file; restore ``sys.stdout`` on every path out.
 
     Rank 0 writes ``impurityModel-<label>[-dc].out``; the other ranks write their own file when
     ``verbosity > 0`` and otherwise discard their output.
     """
-    suffix = "-dc" if dc_flag == 1 else ""
+    suffix = {"dc": "-dc", "selfenergy": ""}.get(task, f"-{task}")
     if comm.rank == 0:
         name = f"impurityModel-{label.strip()}{suffix}.out"
     elif verbosity > 0:
@@ -132,387 +57,73 @@ def redirected_stdout(label, dc_flag, comm, verbosity):
             sys.stdout = saved
 
 
-@dataclass
-class Problem:
-    """Everything the two kinds of call share, in the fitting basis."""
+def solve(call, comm=None):
+    """Run ``call.task`` on a :class:`ClusterCall`.
 
-    model: ImpurityModel
-    basis: object
-    solver: object
-    #: Block partition of the fit; the double counting carries no coupling between blocks.
-    blocks: list
-    #: Rotation from the fitting basis (the solver's) to RSPt's correlated basis: columns are the
-    #: fitting orbitals expressed in RSPt's orbitals.
-    corr_to_solver: np.ndarray
-    #: RSPt's incoming double counting, in the fitting basis.
-    sig_dc: np.ndarray
-    cap_ledger: CapLedger
-
-
-def build_operators(arrays, n_orb):
-    """RSPt's one-body operator matrices as a :class:`LocalOperators` in RSPt's correlated basis.
-
-    ``arrays`` maps any of ``ms, msp, ml, mlp, msaxis`` (``(n_orb, n_orb)``: S_z, S_+, L_z, L_+, S along the
-    spin axis) and ``dxyz`` (``(n_orb, n_orb, 3)``, RSPt's Fortran layout) to the arrays RSPt holds in
-    ``clustertype%observables``, and ``symm_rep`` (``(n_orb, n_orb, n_symm)``) with ``symm_timerev``
-    (``(n_symm,)``, nonzero = antiunitary) to ``clustertype%symm(:)%rep`` / ``%timerev``; absent or ``None``
-    entries are left out.  The symmetry operations are stored, not verified or used yet.  ``None`` when nothing was passed.
+    Pure Python: nothing here knows about cffi.  The arrays of the call are RSPt's and are mutated in
+    place.  Returns 0, or -1 if the self-energy solve failed (after poisoning ``sig`` and aborting the
+    communicator).  An unknown task raises on every rank.
     """
-    if not arrays:
-        return None
-    present = {k: v for k, v in arrays.items() if v is not None}
-    if not present:
-        return None
-    names = {"ms": "sz", "msp": "s_plus", "ml": "lz", "mlp": "l_plus", "msaxis": "s_axis"}
-    unknown = set(present) - set(names) - {"dxyz", "symm_rep", "symm_timerev"}
-    if unknown:
-        raise ValueError(f"unknown operator arrays {sorted(unknown)}")
+    comm = MPI.COMM_WORLD if comm is None else comm
+    if call.task not in TASKS:
+        raise ValueError(f"unknown task {call.task!r}; expected one of {sorted(TASKS)}")
+    call.synchronise(comm)
 
-    def shaped(name, value, shape):
-        # Require the shape rather than reshape: a flat Fortran buffer would otherwise be transposed silently.
-        value = np.array(value, dtype=complex)
-        if value.shape != shape:
-            raise ValueError(f"operator array {name} has shape {value.shape}, expected {shape}")
-        return value
-
-    kwargs = {names[k]: shaped(k, v, (n_orb, n_orb)) for k, v in present.items() if k in names}
-    if "dxyz" in present:
-        kwargs["dipole"] = np.moveaxis(shaped("dxyz", present["dxyz"], (n_orb, n_orb, 3)), -1, 0)
-    if "symm_rep" in present:
-        reps = np.array(present["symm_rep"], dtype=complex)
-        if reps.ndim != 3 or reps.shape[:2] != (n_orb, n_orb):
-            raise ValueError(f"operator array symm_rep has shape {reps.shape}, expected ({n_orb}, {n_orb}, n_symm)")
-        timerev = np.asarray(present.get("symm_timerev", np.zeros(reps.shape[2], dtype=int))).reshape(-1)
-        if timerev.shape != (reps.shape[2],):
-            raise ValueError(f"symm_timerev has {timerev.size} entries for {reps.shape[2]} symmetry operations")
-        kwargs["symmetry_ops"] = tuple((reps[:, :, i].copy(), bool(timerev[i])) for i in range(reps.shape[2]))
-    elif "symm_timerev" in present:
-        raise ValueError("symm_timerev given without symm_rep")
-    if not kwargs:
-        return None
-    return LocalOperators(source="rspt", frame="global", **kwargs)
-
-
-def _report_operator_check(operators, rot_to_spherical, comm):
-    """Print the site frame RSPt's operators define and how well they fit the spherical rebuild.
-
-    RSPt's ``ml``/``mlp`` are along the global (crystal) axes; the spherical rebuild is in the frame
-    ``rot_to_spherical`` defines. A rotated site therefore shows as a rotation with a roundoff residual, not as
-    an error; a large residual means the basis is not what ``rot_to_spherical`` says. The spin operators are
-    compared directly (RSPt keeps spin in the global frame).
-    """
-    if comm.rank != 0 or operators is None:
-        return
-    l = _shell_l(rot_to_spherical)
-    if l is None:
-        print("RSPt operators: no single spin-resolved shell, so no spherical rebuild to compare with.", flush=True)
-        return
-    spherical = LocalOperators.from_spherical(rot_to_spherical, (l,))
-    parts = []
-    for name in ("sz", "s_plus"):
-        got, ref = getattr(operators, name), getattr(spherical, name)
-        if got is not None and ref is not None and got.shape == ref.shape:
-            parts.append(f"{name} {np.max(np.abs(got - ref)):.2e}")
-    if parts:
-        print("RSPt spin operators vs spherical rebuild (max abs deviation): " + ", ".join(parts), flush=True)
-    frame = site_frames(operators, rot_to_spherical, (l,))[0]
-    if frame is not None:
-        warn = "" if frame.residual < 1e-6 else "  WARNING: L is not a rotation of the spherical L in this basis"
-        print(f"RSPt site frame: {frame.describe()}{warn}", flush=True)
-
-
-def _shell_l(rot_to_spherical):
-    """``l`` when the rotation spans exactly one spin-resolved shell, else ``None`` (several or partial shells)."""
-    n = rot_to_spherical.shape[1]
-    l = (n // 2 - 1) // 2
-    return l if n == 2 * (2 * l + 1) and n == rot_to_spherical.shape[0] else None
-
-
-def prepare_problem(
-    *, label, line, dc_flag, h_dft, u4, hyb, w, corr_to_spherical, sig_dc, eim, tau, comm, verbosity, operators=None
-):
-    """Fit h0 and build the solver model.  ``h_dft``, ``u4``, ``hyb``, ``sig_dc`` are in RSPt's correlated basis.
-
-    Prints the settings header, fits the bath (or reuses this iteration's fit), rotates everything
-    into the fitting basis -- the basis the solver then works in; the fit chooses it from the data
-    as RSPt sends it -- and returns the problem there.
-    """
-    rank = comm.rank
-    n_orb = h_dft.shape[0]
-    filename = archive.FILENAME
-    label = label.strip()
-    line = with_temperature(line, tau)
-    print(format_settings_header(line, tau=tau, delta=eim), flush=True)
-    basis, solver = line.basis, line.solver
-    nominal_occ = basis.nominal_occ
-    if any(n0 > n_orb for n0 in nominal_occ.values()) or any(n0 < 0 for n0 in nominal_occ.values()):
-        raise RuntimeError(f"Nominal impurity occupation {nominal_occ} out of bounds [0, {n_orb}]")
-
-    cap_ledger = CapLedger()
-    if dc_flag != 1:
-        # The cap the DC search of this iteration solved at bounds this solve's auto cap.
-        cap_ledger = CapLedger(ceiling=archive.double_counting_cap(filename, label, comm))
-        # Seed the ground-state search with the charge sector the double-counting search settled
-        # on for this same iteration.  The DC is only meaningful if this solve lands on the state
-        # it was measured against, and the sector walk is a discrete choice that a small change in
-        # the incoming hybridization can flip.  The walk still runs and can still move.
-        dc_sector = archive.double_counting_sector(filename, label, comm)
-        if dc_sector is not None and dc_sector != sum(nominal_occ.values()):
-            if rank == 0:
-                print(
-                    f"Seeding the ground-state search at the double-counting search's sector "
-                    f"{dc_sector} (nominal {sum(nominal_occ.values())})."
-                )
-            nominal_occ = split_total_over_groups(dc_sector, nominal_occ)
-            basis = replace(basis, nominal_occ=nominal_occ)
-
-    if abs(w[1] - w[0]) > eim / 2 and rank == 0:
-        print(
-            "WARNING: Your real frequency mesh is rather coarse. Recommended dE <= eim/5, "
-            "in order to guarantee resolution of fine structures in the self energy."
-        )
-    if rank == 0 and corr_to_spherical.shape[0] != corr_to_spherical.shape[1]:
-        print(
-            "The correlated orbitals span only part of the shell "
-            f"({corr_to_spherical.shape[0]} of {corr_to_spherical.shape[1]} "
-            "spin-orbitals); the solver will skip the L/S/J observables."
-        )
-
-    fitted = fit_h0(
-        h_dft,
-        hyb,
-        line.n_baths,
-        w,
-        eim,
-        line.fit,
-        u4=u4,
-        rot_to_spherical=corr_to_spherical,
-        label=label,
-        filename=filename,
-        verbose=(verbosity >= 1 or dc_flag == 1),
-        extra_verbose=(verbosity >= 2),
-        comm=comm,
-    )
-    # The fit neglected the couplings between blocks (symm_prec) in its own basis, in which the
-    # impurity block, the hopping and the double counting are exactly block diagonal.  That is the
-    # basis the solver must work in: rotated back to RSPt's basis the neglected couplings are
-    # spread over all orbitals again and the solver would merge the blocks.  So the interaction, the
-    # Green's functions and the double counting follow the fit, and ``corr_to_solver`` is the
-    # rotation back to RSPt's correlated basis.
-    rotation = fitted.rotation
-    if rank == 0:
-        deviation = np.max(np.abs(rotation - np.eye(n_orb)))
-        print(f"Max abs deviation of the fitting basis from RSPt's correlated basis: {deviation:.3e}")
-    blocks = fitted.block_structure.blocks
-    n_total = fitted.H_solver.shape[0]
-    full_rotation = np.eye(n_total, dtype=complex)
-    full_rotation[np.ix_(fitted.impurity_indices, fitted.impurity_indices)] = rotation
-    H_solver = rotate_matrix(fitted.H_solver, full_rotation)
-    H_imp = project_to_blocks(rotate_matrix(fitted.H_imp, rotation), blocks)
-    v = fitted.v @ rotation
-    hyb = rotate_Greens_function(hyb, rotation)
-    h_dft = rotate_matrix(h_dft, rotation)
-    u4 = rotate_4index_U(u4, rotation)
-    sig_dc_fit = project_to_blocks(rotate_matrix(sig_dc, rotation), blocks)
-    corr_to_solver = rotation
-    # Only if the fit neglected something are its one-body blocks authoritative and the interaction
-    # must not merge them back; otherwise the safety net stays on.
-    basis = replace(basis, interaction_merges_blocks=not fitted.neglected_couplings)
-    if rank == 0:
-        symm_prec = line.fit.symm_prec
-        if fitted.neglected_couplings:
-            print(
-                f"symm_prec {symm_prec:g}: couplings between {len(blocks)} blocks are neglected "
-                "in the fit and in the solver (the interaction does not merge them).",
-                flush=True,
-            )
-        elif line.fit.neglects_couplings:
-            print(
-                f"symm_prec {symm_prec:g} neglects no coupling of this problem; "
-                "the solver may still merge blocks the interaction couples.",
-                flush=True,
-            )
-    # One ImpurityModel from the fitted blocks: it assembles the operator and derives the
-    # impurity/bath orbital layout from the block sizes.  model.h0 is the raw h_dft + bath (RSPt
-    # passes h_dft WITHOUT the double counting subtracted) and model.dc is RSPt's current dc:
-    # calc_selfenergy subtracts it and the fixed_*_dc searches use it as their guess.
-    rot_to_spherical = np.conj(rotation.T) @ corr_to_spherical
-    if operators is not None and verbosity >= 1:
-        _report_operator_check(operators, corr_to_spherical, comm)
-    model = ImpurityModel.from_blocks(
-        H_imp,
-        v,
-        fitted.H_bath,
-        u4=u4,
-        dc=sig_dc_fit,
-        rot_to_spherical=rot_to_spherical,
-        bath_valence_conduction=(fitted.valence_bath_indices, fitted.conduction_bath_indices),
-        operators=None if operators is None else operators.rotated(rotation),
-    )
-    return (
-        Problem(model, basis, solver, blocks, corr_to_solver, sig_dc_fit, cap_ledger),
-        dict(
-            line=replace(line, basis=basis),
-            fitted=fitted,
-            H_solver=H_solver,
-            h_dft=h_dft,
-            u4=u4,
-            hyb=hyb,
-            v=v,
-            rot_to_spherical=rot_to_spherical,
-        ),
-    )
-
-
-def _report_fit(problem, context, *, w, eim, tau, label, comm):
-    """Verbosity >= 1: how well the bath reproduces the hybridization, and the DFT reference occupation."""
-    fitted = context["fitted"]
-    hyb = context["hyb"]
-    hyb_fit = bath_hybridization(w, eim, fitted.H_bath, context["v"])
-    # Unoccupied states are only fitted with fit_unocc, so also report the deviation on the occupied side alone.
-    fit_dev = np.max(np.abs(hyb_fit - hyb))
-    fit_dev_occ = np.max(np.abs(hyb_fit[w <= 0] - hyb[w <= 0]))
-    print(f"Max abs deviation of the fitted hybridization function: {fit_dev_occ:.6f} (w <= 0), {fit_dev:.6f} (all w)")
-    save_Greens_function(
-        rotate_Greens_function(hyb_fit, np.conj(problem.corr_to_solver.T)), w, "hyb-fit", label.strip()
-    )
-    # Is the occupation fixed_occupation_dc pins to the true DFT impurity occupation, or an artefact of
-    # how finely the bath was discretized?  Diagnostic only; see dc_reference.report_continuum_reference.
-    n0_disc = discretized_impurity_occupation(problem.model, tau)
-    report_continuum_reference(context["h_dft"], hyb, hyb_fit, w, eim, tau, n0_disc, rank=comm.rank)
-
-
-def solve(
-    label,
-    solver_line,
-    dc_line,
-    dc_flag,
-    h_dft,
-    u4,
-    hyb,
-    iw,
-    w,
-    sig,
-    sig_real,
-    sig_static,
-    sig_dc,
-    corr_to_spherical_in,
-    n_orb,
-    n_rot_cols,
-    n_orb_full,
-    eim,
-    tau,
-    verbosity,
-    operator_arrays=None,
-):
-    """Run the double-counting or self-energy solve on already-marshalled arrays.
-
-    Pure Python: ``label``/``solver_line``/``dc_line`` are ``str`` and every array is a numpy
-    array.  ``operator_arrays`` optionally carries RSPt's observables (see :func:`build_operators`); they
-    are rotated into the fitting basis with the model and drive the spin pairing.  The arrays are the caller's
-    and are mutated in place.  Returns 0, or -1 if the
-    self-energy solve failed (after adding infinity to ``sig`` and aborting the communicator).
-    """
-    comm = MPI.COMM_WORLD
-    rank = comm.rank
-    corr_to_spherical = reconstruct_corr_to_spherical(corr_to_spherical_in, n_orb, n_rot_cols, n_orb_full)
-    comm.Bcast(corr_to_spherical)
-    comm.Bcast(h_dft)
-    comm.Bcast(u4)
-    comm.Bcast(sig_dc)
-    comm.Bcast(hyb)
-    # Built on the root only and broadcast unconditionally: every rank must reach the collective, and a
-    # malformed input must fail everywhere rather than leave the other ranks waiting.
-    try:
-        operators = build_operators(operator_arrays, n_orb) if comm.rank == 0 else None
-        failure = None
-    except ValueError as exc:
-        operators, failure = None, str(exc)
-    operators, failure = comm.bcast((operators, failure))
-    if failure is not None:
-        raise ValueError(failure)
-
-    # For python, it makes more sense to put the frequency index first, instead of last
-    sig_python = np.moveaxis(sig, -1, 0)
-    sig_real_python = np.moveaxis(sig_real, -1, 0)
-    hyb = np.moveaxis(hyb, -1, 0)
-
-    with redirected_stdout(label, dc_flag, comm, verbosity):
-        verbosity = comm.bcast(verbosity)
+    with redirected_stdout(call.label, call.task, comm, call.verbosity):
+        solver_line = call.solver_line
         line = parse_solver_line(solver_line)
-        if rank == 0 and len(solver_line.strip()) >= 120 and not re.search(r"[!#]", solver_line):
+        if comm.rank == 0 and len(solver_line.strip()) >= 120 and not re.search(r"[!#]", solver_line):
             print(
                 "WARNING: the solver line fills all 120 characters of RSPt's solver string; the last option may have been cut off.",
                 flush=True,
             )
-        request = parse_dc_line(dc_line) if dc_flag == 1 else None
-        problem, context = prepare_problem(
-            label=label,
-            line=line,
-            dc_flag=dc_flag,
-            h_dft=h_dft,
-            u4=u4,
-            hyb=hyb,
-            w=w,
-            corr_to_spherical=corr_to_spherical,
-            sig_dc=sig_dc,
-            eim=eim,
-            tau=tau,
-            comm=comm,
-            verbosity=verbosity,
-            operators=operators,
-        )
-        fitted = context["fitted"]
+        request = parse_dc_line(call.dc_line) if call.task == "dc" else None
+        if request is not None and len(call.shells.shell_ls) > 1 and request.mode in SINGLE_SHELL_SCHEMES:
+            raise ValueError(
+                f"The double counting '{request.mode}' is defined for one shell; this cluster has "
+                f"{len(call.shells.shell_ls)} (l = {list(call.shells.shell_ls)}). Use sigma_inf or an ED criterion (gap, occupation, peak)."
+            )
+        problem = prepare_problem(call, line, comm)
         on_root(
             comm,
             lambda: archive.write_problem(
                 archive.FILENAME,
-                label,
-                line=context["line"],
+                call.label,
+                line=problem.line,
                 solver_line=solver_line,
-                tau=tau,
-                delta=eim,
-                w=w,
-                iw=iw,
-                h_solver=context["H_solver"],
-                h_dft=context["h_dft"],
-                h_bath=fitted.H_bath,
-                v=context["v"],
-                u4=context["u4"],
+                tau=call.tau,
+                delta=call.eim,
+                w=call.w,
+                iw=call.iw,
+                h_solver=problem.H_solver,
+                h_dft=problem.h_dft,
+                h_bath=problem.fitted.H_bath,
+                v=problem.v,
+                u4=problem.u4,
                 dc=problem.sig_dc,
                 corr_to_solver=problem.corr_to_solver,
-                rot_to_spherical=context["rot_to_spherical"],
-                layout=(fitted.impurity_indices, fitted.valence_bath_indices, fitted.conduction_bath_indices),
+                rot_to_spherical=problem.rot_to_spherical,
+                layout=(
+                    problem.fitted.impurity_indices,
+                    problem.fitted.valence_bath_indices,
+                    problem.fitted.conduction_bath_indices,
+                ),
                 operators=problem.model.operators,
+                shell_ls=call.shells.shell_ls,
             ),
         )
-        if verbosity >= 1:
-            on_root(comm, lambda: _report_fit(problem, context, w=w, eim=eim, tau=tau, label=label, comm=comm))
-
-        if dc_flag == 1:
-            return run_double_counting(
-                request, problem, context, label=label, sig_dc=sig_dc, w=w, tau=tau, comm=comm, verbosity=verbosity
+        if call.verbosity >= 1:
+            on_root(
+                comm,
+                lambda: _report_fit(problem, w=call.w, eim=call.eim, tau=call.tau, label=call.label, comm=comm),
             )
-        status = run_selfenergy(
-            problem,
-            iw=iw,
-            w=w,
-            eim=eim,
-            label=label,
-            sig=sig,
-            sig_static=sig_static,
-            sig_python=sig_python,
-            sig_real=sig_real,
-            sig_real_python=sig_real_python,
-            comm=comm,
-            verbosity=verbosity,
-        )
+        status = TASKS[call.task](problem, call, request, comm)
     comm.barrier()
     return status
 
 
-def run_double_counting(request, problem, context, *, label, sig_dc, w, tau, comm, verbosity):
-    """The ``dc_flag == 1`` call: write the damped double counting into ``sig_dc`` (RSPt's basis).
+def run_double_counting(problem, call, request, comm):
+    """The ``"dc"`` task: write the damped double counting into ``sig_dc`` (RSPt's basis).
 
     A search that fails leaves ``sig_dc`` holding RSPt's incoming value and still returns 0; see
     :func:`impurityModel_interface.double_counting.run_double_counting`.
@@ -525,50 +136,55 @@ def run_double_counting(request, problem, context, *, label, sig_dc, w, tau, com
         guess=problem.sig_dc,
         blocks=problem.blocks,
         corr_to_solver=problem.corr_to_solver,
-        w=w,
-        tau=tau,
+        w=call.w,
+        tau=call.tau,
         nominal_total=sum(problem.basis.nominal_occ.values()),
         comm=comm,
-        verbosity=verbosity,
+        verbosity=call.verbosity,
         cap_ledger=problem.cap_ledger,
         filename=archive.FILENAME,
-        label=label,
+        label=call.label,
     )
     if damped is not None:
         # The double counting is calculated in the fitting basis, RSPt expects it in the corr basis.
-        sig_dc[:, :] = rotate_matrix(damped, np.conj(problem.corr_to_solver.T))
+        call.out.write_double_counting(problem.to_rspt(damped))
     comm.barrier()
     return 0
 
 
-def run_selfenergy(
-    problem, *, iw, w, eim, label, sig, sig_static, sig_python, sig_real, sig_real_python, comm, verbosity
-):
-    """The ``dc_flag != 1`` call: fill ``sig``, ``sig_real``, ``sig_static`` in RSPt's basis."""
+def run_selfenergy(problem, call, request, comm):
+    """The ``"selfenergy"`` task: fill ``sig``, ``sig_real``, ``sig_static`` in RSPt's basis."""
+    out = call.out
     try:
-        meshes = Meshes(iw=1j * iw, w=w, delta=eim)
+        meshes = Meshes(iw=1j * call.iw, w=call.w, delta=call.eim)
         results = calc_selfenergy(
             problem.model,
             meshes,
             problem.basis,
             problem.solver,
             comm=comm,
-            verbosity=verbosity,
-            cluster_label=label.strip(),
+            verbosity=call.verbosity,
+            cluster_label=call.label.strip(),
             cap_ledger=problem.cap_ledger,
         )
         # calc_selfenergy returns everything in the fitting basis; RSPt expects the corr basis.
-        u = np.conj(problem.corr_to_solver.T)
+        out.write_selfenergy(
+            problem.to_rspt(results["sigma_static"]) if comm.rank == 0 else None,
+            problem.to_rspt_green(results["sigma"]) if comm.rank == 0 else None,
+            problem.to_rspt_green(results["sigma_real"]) if comm.rank == 0 else None,
+            comm,
+        )
         if comm.rank == 0:
-            sig_static[:, :] = rotate_matrix(results["sigma_static"], u)
-            sig_python[:, :, :] = rotate_Greens_function(results["sigma"], u)
-            sig_real_python[:, :, :] = rotate_Greens_function(results["sigma_real"], u)
-        comm.Bcast(sig_static, root=0)
-        comm.Bcast(sig_real, root=0)
-        comm.Bcast(sig, root=0)
-        if comm.rank == 0:
+            u = np.conj(problem.corr_to_solver.T)
             archive.write_selfenergy(
-                archive.FILENAME, label, results, sig_static, sig_real_python, sig_python, rotate_Greens_function, u
+                archive.FILENAME,
+                call.label,
+                results,
+                out.sig_static,
+                out.sig_real_python,
+                out.sig_python,
+                rotate_Greens_function,
+                u,
             )
     except Exception as error:
         print("!" * 100)
@@ -579,8 +195,38 @@ def run_selfenergy(
             flush=True,
         )
         print("!" * 100)
-        sig[:, :, -1] += 1j * np.inf
+        out.poison()
         comm.Abort(-1)
         return -1
     print("Self energy calculated! impurityModel shutting down.", flush=True)
     return 0
+
+
+def run_spectra(problem, call, request, comm):
+    """Spectra of the fitted model; the requests come from ``impurityModel.toml``.  Nothing goes back to RSPt."""
+    from impurityModel.api import calc_spectroscopy, find_environment_file, load_spectroscopy_requests, save_spectra
+
+    try:
+        requests = load_spectroscopy_requests(find_environment_file(), comm=comm)
+        result = calc_spectroscopy(
+            problem.model,
+            requests,
+            problem.basis,
+            problem.solver,
+            comm=comm,
+            verbosity=call.verbosity,
+            cluster_label=call.label,
+        )
+        if comm.rank == 0:
+            save_spectra(result, f"spectra-{call.label}.h5")
+    except Exception:
+        print(f"Exception caught on rank {comm.rank}!\n{traceback.format_exc()}", flush=True)
+        comm.Abort(-1)
+        return -1
+    print("Spectra calculated! impurityModel shutting down.", flush=True)
+    return 0
+
+
+#: What each task does, ``(problem, call, dc_request, comm) -> status``.
+TASKS = {"dc": run_double_counting, "selfenergy": run_selfenergy, "spectra": run_spectra}
+assert set(TASKS) <= set(TASK_NAMES)

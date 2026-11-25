@@ -131,3 +131,10 @@ def test_settings_header_lists_the_line_and_the_run():
 def test_settings_header_aligns_the_columns():
     lines = format_settings_header(parse_solver_line("8 10")).splitlines()
     assert len({row.index("|>") for row in lines}) == 1
+
+
+def test_n0_lists_one_occupation_per_shell():
+    line = parse_solver_line("6,8 10")
+    assert line.nominal_occ == 14 and line.nominal_per_shell == (6, 8)
+    assert line.basis.nominal_occ == {0: 6, 1: 8}
+    assert "6,8" in format_settings_header(line)

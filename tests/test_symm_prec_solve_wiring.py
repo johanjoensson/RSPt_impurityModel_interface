@@ -16,7 +16,9 @@ from scipy.sparse.csgraph import connected_components
 pytest.importorskip("mpi4py")
 from rspt2spectra.utils import rotate_matrix
 
-from impurityModel_interface import double_counting, solve
+from fake_cluster import call_from_arrays
+
+from impurityModel_interface import double_counting, problem as problem_module, solve
 
 N = 5
 N_IW = 4
@@ -69,7 +71,15 @@ def _hermitian(seed):
 
 
 def _solve(
-    shared_tmp_path, monkeypatch, solver_line, problem, dc_flag=0, dc_line="occ 3", sig_dc=None, corr_to_spherical=None
+    shared_tmp_path,
+    monkeypatch,
+    solver_line,
+    problem,
+    dc_flag=0,
+    dc_line="occ 3",
+    sig_dc=None,
+    corr_to_spherical=None,
+    operators=None,
 ):
     monkeypatch.chdir(shared_tmp_path)
     H, hyb, w, eim = problem
@@ -85,23 +95,21 @@ def _solve(
         sig_real=np.zeros((N, N, n_w), order="F", dtype=complex),
         sig_static=np.zeros((N, N), order="F", dtype=complex),
         sig_dc=sig_dc,
-        corr_to_spherical_in=np.asfortranarray(np.eye(N) if corr_to_spherical is None else corr_to_spherical).astype(
-            complex
-        ),
     )
-    status = solve.solve(
+    sph = np.asfortranarray(np.eye(N) if corr_to_spherical is None else corr_to_spherical).astype(complex)
+    call = call_from_arrays(
         label="t",
         solver_line=solver_line,
         dc_line=dc_line,
-        dc_flag=dc_flag,
-        n_orb=N,
-        n_rot_cols=N,
-        n_orb_full=N,
+        task="dc" if dc_flag == 1 else "selfenergy",
+        corr_to_spherical_in=sph,
         eim=eim,
         tau=0.01,
         verbosity=0,
+        operators=operators,
         **arrays,
     )
+    status = solve.solve(call)
     assert status == 0
     return arrays
 
@@ -117,14 +125,14 @@ def _install_spies(monkeypatch, dc_in_corr=None, sigma_static_cf=None):
     connected components of the impurity block and of the double counting handed to the solver.
     """
     calls = []
-    real_from_blocks = solve.ImpurityModel.from_blocks.__func__
+    real_from_blocks = problem_module.ImpurityModel.from_blocks.__func__
 
     def from_blocks(cls, H_imp, V, H_bath, *, dc=None, **kwargs):
         calls.append(("model", _n_components(H_imp), None if dc is None else _n_components(dc)))
         return real_from_blocks(cls, H_imp, V, H_bath, dc=dc, **kwargs)
 
-    monkeypatch.setattr(solve.ImpurityModel, "from_blocks", classmethod(from_blocks))
-    real_fit_h0 = solve.fit_h0
+    monkeypatch.setattr(problem_module.ImpurityModel, "from_blocks", classmethod(from_blocks))
+    real_fit_h0 = problem_module.fit_h0
 
     def fit_h0(*args, **kwargs):
         options = args[5]
@@ -151,7 +159,7 @@ def _install_spies(monkeypatch, dc_in_corr=None, sigma_static_cf=None):
             "gs_realaxis": None,
         }
 
-    monkeypatch.setattr(solve, "fit_h0", fit_h0)
+    monkeypatch.setattr(problem_module, "fit_h0", fit_h0)
     if dc_in_corr is not None:
         monkeypatch.setattr(double_counting, "fixed_occupation_dc", fixed_occupation_dc)
     if sigma_static_cf is not None:
@@ -239,7 +247,7 @@ def test_the_fit_gets_the_interaction_and_the_densification_budget(shared_tmp_pa
         seen["options"] = args[5]
         raise RuntimeError("stop after the fit call")
 
-    monkeypatch.setattr(solve, "fit_h0", fit_h0)
+    monkeypatch.setattr(problem_module, "fit_h0", fit_h0)
     with pytest.raises(RuntimeError, match="stop after the fit call"):
         _solve(shared_tmp_path, monkeypatch, line, _problem(3e-3))
     assert seen["options"].u_densify == expected
@@ -256,7 +264,7 @@ def test_the_fit_gets_rspts_data_and_spherical_map_unrotated(shared_tmp_path, mo
         seen.update(kwargs, h_dft=h_dft, hyb=hyb)
         raise RuntimeError("stop after the fit call")
 
-    monkeypatch.setattr(solve, "fit_h0", fit_h0)
+    monkeypatch.setattr(problem_module, "fit_h0", fit_h0)
     H, hyb, w, eim = _problem(3e-3, _unitary(5))
     sph = _unitary(6)
     with pytest.raises(RuntimeError, match="stop after the fit call"):

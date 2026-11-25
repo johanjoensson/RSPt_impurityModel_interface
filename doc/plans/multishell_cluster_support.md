@@ -368,3 +368,18 @@ impurityModel `src/impurityModel/test/`:
 - **Q3** `Cf` in non-centrosymmetric groups: does `symm_irrdecompose` keep shell purity? The purity
   check makes it a clear error; fix would be a shell-blocked decomposition in RSPt.
 - **Q4** Semicore `Ewin`/energy-set requirements for the NiO 2p extension need confirming.
+
+
+## Status, Nov 2026 (wrapper refactor on `refactor/cluster-call`)
+
+Done in the wrapper: the layout (`preoffset`/`offset`/`nspmat`) is read into `cluster.Shells`; the
+reconstruction of `corr_to_spherical` is segment-aware (bit for bit the old result for one shell);
+`N0` takes one occupation per shell (`6,8`) and is checked against the orbitals of each shell;
+`shell_ls` goes into the model; charge moves only onto shells that hybridize; the archive records
+`Spherical shell l` and `nominal occupation per shell`; static double counting is refused for several
+shells; `ctx%task = "spectra"` runs `calc_spectroscopy` on the block model (valence shell = the one that
+hybridizes, core shell = the other). rspt2spectra: the bath pool counts only hybridizing blocks
+(`HYB_WEIGHT_REL_TOL = 1e-3`, uncommitted there; still unmeasured on NiO 2p).
+
+Not done: a real RSPt run with two shells; RSPt sending `ctx%task` (no XAS call site yet, Python falls
+back to `ctx%dc_flag`); `ctx%nspmat` is added in `green_impmod_interface.F90` but uncommitted.

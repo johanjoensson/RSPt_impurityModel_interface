@@ -17,6 +17,8 @@ import pytest
 pytest.importorskip("mpi4py")
 from mpi4py import MPI  # noqa: F401
 
+from fake_cluster import call_from_arrays
+
 from impurityModel_interface import solve
 
 N_ORB = 4
@@ -57,17 +59,16 @@ def _arrays():
 def _call(shared_tmp_path, monkeypatch, solver_line):
     monkeypatch.chdir(shared_tmp_path)
     return solve.solve(
-        label="Ni-3d",
-        solver_line=solver_line,
-        dc_line="",
-        dc_flag=0,
-        n_orb=N_ORB,
-        n_rot_cols=N_ORB,
-        n_orb_full=N_ORB,
-        eim=0.1,
-        tau=0.01,
-        verbosity=0,
-        **_arrays(),
+        call_from_arrays(
+            label="Ni-3d",
+            solver_line=solver_line,
+            dc_line="",
+            task="selfenergy",
+            eim=0.1,
+            tau=0.01,
+            verbosity=0,
+            **_arrays(),
+        )
     )
 
 

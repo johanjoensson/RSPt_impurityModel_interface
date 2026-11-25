@@ -172,6 +172,7 @@ def write_problem(
     rot_to_spherical,
     layout,
     operators=None,
+    shell_ls=None,
 ):
     """Write the solver problem of this iteration into its group.  Rank 0 only.
 
@@ -204,6 +205,13 @@ def write_problem(
             v=v,
             operators=operators,
         )
+        # The basis holds the occupation the solve actually used (the double-counting sector, not N0).
+        per_shell = [line.basis.nominal_occ[a] for a in sorted(line.basis.nominal_occ)]
+        if len(per_shell) > 1:
+            group.attrs["nominal occupation"] = sum(per_shell)
+            write_dataset(group, "nominal occupation per shell", np.asarray(per_shell, dtype=int))
+        if shell_ls:
+            write_dataset(group, "Spherical shell l", np.asarray(shell_ls, dtype=int))
         group.attrs["n_baths"] = line.n_baths
         for key, value in line.fit.to_attrs().items():
             group.attrs[key] = value
